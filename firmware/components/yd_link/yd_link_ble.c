@@ -18,8 +18,8 @@
  *     だけ新規ペアリングを受け付ける。それ以外は登録済みの相手以外を切断する
  *   - レシーバーは最初にペアリングした机上ユニットのアドレスを覚え、以後それにしか繋がない
  *   - 入出力のない機器同士なので BLE のペアリング自体は Just Works（中間者攻撃に弱い）
- *   - その上に yd_sec（事前共有鍵（鍵ファイル keyrelay-key.bin）による相互認証＋AES-256-GCM）を重ねる。
- *     鍵を知らない相手とはペアリングできても1バイトもやり取りしない（yd_sec.h 参照）
+ *   - その上に yd_sec（事前共有鍵（鍵ファイル keyrelay-key.bin）と接続ごとの X25519 による相互認証＋
+ *     AES-256-GCM）を重ねる。鍵を知らない相手とはペアリングできても1バイトもやり取りしない（yd_sec.h 参照）
  *
  *  状態: s_ready = BLE として送受信できる（暗号化＋購読済み）
  *        s_up    = yd_sec のハンドシェイク完了（ここで初めてアプリに「接続」を知らせる）
@@ -110,6 +110,7 @@ static volatile bool s_peer_addr_valid;
 static volatile bool s_forget_on_disconnect;   /* 認証前の失敗で、こちらから切った */
 static volatile bool s_conn_was_bonded;        /* 接続した時点で、この相手のボンドがあった */
 static volatile bool s_conn_authed;            /* この接続で相互認証が通った */
+static volatile bool s_closing;                /* 切ると決めた。切断が終わるまでデータもハンドシェイクも進めない */
 static volatile uint32_t s_ev_drops;           /* 受信キューに状態の通知を入れられなかった回数 */
 static uint32_t s_bond_delete_fail;            /* 消すべきボンドを消せなかった回数 */
 static ble_addr_t s_target;
@@ -324,9 +325,13 @@ static bool s_have_psk;
 static SemaphoreHandle_t s_sec_mutex;      /* tx_task（暗号化）と rx_task（鍵の更新）の排他 */
 static yd_sec_keys_t s_keys;
 static uint8_t s_my_nonce[YD_SEC_NONCE_LEN], s_peer_nonce[YD_SEC_NONCE_LEN];
+static uint8_t s_my_esk[YD_SEC_EPK_LEN];                      /* この接続だけの X25519 秘密鍵（RAM のみ） */
+static uint8_t s_my_epk[YD_SEC_EPK_LEN], s_peer_epk[YD_SEC_EPK_LEN];
+static int64_t s_x25519_us;                                    /* X25519 の計算にかかった時間（ログ用） */
 static uint8_t s_peer_mac[YD_SEC_MAC_LEN];
 static bool s_hs_hello_sent, s_hs_peer_hello, s_hs_keys, s_hs_auth_sent, s_hs_peer_auth;
 static uint32_t s_tx_ctr, s_rx_ctr;
+static uint32_t s_rx_overflows_seen;   /* 鍵を作ったときの g_ydl_stats.rx_overflows（抜けの原因の見分け用） */
 static esp_timer_handle_t s_hs_timer;
 static esp_timer_handle_t s_conn_timer;
 static uint32_t s_sec_fail;
@@ -373,10 +378,31 @@ static void hs_disconnect(const char *why)
          * 相手の BLE ボンドも消す。正しい相手ならつなぎ直したときに自動でペアリングし直す */
         s_forget_on_disconnect = true;
     }
+    s_closing = true;
+    set_up(false);          /* 切断が終わるのを待たずに送受信を止める（後続の通し番号を相手に送らない） */
     uint16_t c = s_conn;
     if (c != BLE_HS_CONN_HANDLE_NONE) {
         ble_gap_terminate(c, BLE_ERR_AUTH_FAIL);
     }
+}
+
+/* 失敗の印を付けずに切る（版の違い・送信の取りこぼしなど。前からのボンドは残る） */
+static void link_drop(const char *why)
+{
+    ESP_LOGW(TAG, YD_L("%s → disconnecting", "%s → 切断します"), why);
+    s_closing = true;
+    set_up(false);          /* 後続のパケットを送ると、相手は抜けを改ざんとみなすので先に止める */
+    uint16_t c = s_conn;
+    if (c != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM);
+    }
+}
+
+static int esp_rng(void *ctx, unsigned char *buf, size_t len)
+{
+    (void)ctx;
+    esp_fill_random(buf, len);
+    return 0;
 }
 
 static void hs_timeout_cb(void *arg)
@@ -407,6 +433,9 @@ static void hs_reset(void)
     xSemaphoreGive(s_sec_mutex);
     yd_sec_wipe(s_my_nonce, sizeof(s_my_nonce));
     yd_sec_wipe(s_peer_nonce, sizeof(s_peer_nonce));
+    yd_sec_wipe(s_my_esk, sizeof(s_my_esk));
+    yd_sec_wipe(s_my_epk, sizeof(s_my_epk));
+    yd_sec_wipe(s_peer_epk, sizeof(s_peer_epk));
     s_hs_hello_sent = s_hs_peer_hello = s_hs_keys = s_hs_auth_sent = s_hs_peer_auth = false;
 }
 
@@ -425,14 +454,29 @@ static const uint8_t *nonce_p(void) { return s_is_central ? s_peer_nonce : s_my_
 /* 揃った材料に応じて先へ進める */
 static void hs_progress(void)
 {
-    if (s_up || !s_ready) {
+    if (s_up || !s_ready || s_closing) {
         return;
     }
     if (s_hs_hello_sent && s_hs_peer_hello && !s_hs_keys) {
+        uint8_t dh[YD_SEC_EPK_LEN];
+        int64_t t0 = esp_timer_get_time();
+        int xrc = yd_sec_x25519_shared(s_my_esk, s_peer_epk, dh, esp_rng, NULL);
+        s_x25519_us += esp_timer_get_time() - t0;
+        ESP_LOGI(TAG, YD_L("X25519 key exchange: %lld ms", "X25519 の鍵交換: %lld ms"), s_x25519_us / 1000);
+        if (xrc != 0) {
+            yd_sec_wipe(s_my_esk, sizeof(s_my_esk));
+            hs_disconnect(YD_L("Key exchange failed (invalid public key from the peer)", "鍵交換に失敗（相手の公開鍵が不正）"));
+            return;
+        }
+        yd_sec_wipe(s_my_esk, sizeof(s_my_esk));   /* 秘密鍵はもう要らない。残さないことで前方秘匿性になる */
+        const uint8_t *epk_c = s_is_central ? s_my_epk : s_peer_epk;
+        const uint8_t *epk_p = s_is_central ? s_peer_epk : s_my_epk;
         xSemaphoreTake(s_sec_mutex, portMAX_DELAY);
-        int rc = yd_sec_derive(s_psk, nonce_c(), nonce_p(), &s_keys);
+        int rc = yd_sec_derive(s_psk, nonce_c(), nonce_p(), epk_c, epk_p, dh, &s_keys);
         s_tx_ctr = s_rx_ctr = 0;
+        s_rx_overflows_seen = g_ydl_stats.rx_overflows;
         xSemaphoreGive(s_sec_mutex);
+        yd_sec_wipe(dh, sizeof(dh));
         if (rc != 0) {
             hs_disconnect(YD_L("Key derivation failed", "鍵の導出に失敗"));
             return;
@@ -476,8 +520,17 @@ static void hs_progress(void)
 static void send_hello(void)
 {
     esp_fill_random(s_my_nonce, sizeof(s_my_nonce));
-    uint8_t m[3 + YD_SEC_NONCE_LEN] = { YD_SEC_T_HELLO, YD_SEC_VERSION, my_role() };
-    memcpy(&m[3], s_my_nonce, YD_SEC_NONCE_LEN);
+    esp_fill_random(s_my_esk, sizeof(s_my_esk));
+    int64_t t0 = esp_timer_get_time();
+    int rc = yd_sec_x25519_public(s_my_esk, s_my_epk, esp_rng, NULL);
+    s_x25519_us = esp_timer_get_time() - t0;
+    if (rc != 0) {
+        yd_sec_wipe(s_my_esk, sizeof(s_my_esk));
+        hs_disconnect(YD_L("Could not create the X25519 key", "X25519 の鍵を作れませんでした"));
+        return;
+    }
+    uint8_t m[YD_SEC_HELLO_LEN];
+    yd_sec_hello_build(m, my_role(), s_my_nonce, s_my_epk);
     send_raw(m, sizeof(m));
     s_hs_hello_sent = true;
 }
@@ -491,8 +544,8 @@ static void hs_begin(void)
         hs_disconnect(YD_L("No key (keyrelay-key.bin) has been flashed", "鍵（keyrelay-key.bin）が書き込まれていません"));
         return;
     }
-    if (s_is_central && !s_hs_hello_sent) {
-        send_hello();
+    if (!s_hs_hello_sent && (s_is_central || s_hs_peer_hello)) {
+        send_hello();   /* 机上ユニット: 準備が整う前にレシーバーの HELLO が届いていたら、ここで返す */
     }
     esp_timer_stop(s_hs_timer);
     esp_timer_start_once(s_hs_timer, (uint64_t)HS_TIMEOUT_MS * 1000);
@@ -507,18 +560,28 @@ static void on_packet(const pkt_t *p)
         return;
     }
     switch (p->buf[0]) {
-    case YD_SEC_T_HELLO:
-        if (p->len != 3 + YD_SEC_NONCE_LEN || p->buf[1] != YD_SEC_VERSION || p->buf[2] != peer_role() || s_hs_peer_hello) {
+    case YD_SEC_T_HELLO: {
+        uint8_t ver = 0;
+        int hr = s_hs_peer_hello ? YD_SEC_HELLO_MALFORMED
+                                 : yd_sec_hello_parse(p->buf, p->len, peer_role(), s_peer_nonce, s_peer_epk, &ver);
+        if (hr == YD_SEC_HELLO_VERSION) {
+            ESP_LOGE(TAG, YD_L("The peer speaks KeyRelay link protocol v%u, this firmware v%u. Flash the same KeyRelay version to both units",
+                               "相手は KeyRelay のリンクの版 v%u、このファームは v%u です。2台に同じ版の KeyRelay を書き込んでください"),
+                     ver, YD_SEC_VERSION);
+            link_drop(YD_L("Protocol version mismatch", "版の違い"));
+            return;
+        }
+        if (hr != YD_SEC_HELLO_OK) {
             hs_disconnect(YD_L("Malformed HELLO", "不正なHELLO"));
             return;
         }
-        memcpy(s_peer_nonce, &p->buf[3], YD_SEC_NONCE_LEN);
         s_hs_peer_hello = true;
         if (!s_hs_hello_sent && s_ready && s_have_psk) {
             send_hello();       /* 机上ユニット: 受け取ってから返す */
         }
         hs_progress();
         return;
+    }
     case YD_SEC_T_AUTH:
         if (p->len != 1 + YD_SEC_MAC_LEN || s_hs_peer_auth) {
             hs_disconnect(YD_L("Malformed AUTH", "不正なAUTH"));
@@ -535,8 +598,9 @@ static void on_packet(const pkt_t *p)
         uint32_t ctr = 0;
         xSemaphoreTake(s_sec_mutex, portMAX_DELAY);
         int n = yd_sec_open(s_is_central ? s_keys.k_p2c : s_keys.k_c2p, p->buf, p->len, &ctr, pt, sizeof(pt));
-        bool fresh = (n >= 1) && ctr > s_rx_ctr;
-        if (fresh) {
+        uint32_t expect = s_rx_ctr + 1;
+        bool next = (n >= 1) && ctr == expect;     /* 1 ずつ増えるものだけ（抜き取り・並べ替えも検出） */
+        if (next) {
             s_rx_ctr = ctr;
         }
         xSemaphoreGive(s_sec_mutex);
@@ -545,9 +609,15 @@ static void on_packet(const pkt_t *p)
             hs_disconnect(YD_L("Received tampered or corrupted data", "改ざんされたか壊れたデータを受信"));
             return;
         }
-        if (!fresh) {
-            s_sec_fail++;
-            hs_disconnect(YD_L("Received data with an old sequence number (possible replay)", "古い通し番号のデータを受信（リプレイの疑い）"));
+        if (!next) {
+            if (ctr > expect && g_ydl_stats.rx_overflows != s_rx_overflows_seen) {
+                /* 自分の受信キューが一杯で捨てた分。データが欠けたので、つなぎ直して揃える */
+                link_drop(YD_L("A packet was lost (receive queue full)", "パケットを取りこぼしました（受信キューが一杯）"));
+            } else {
+                s_sec_fail++;
+                hs_disconnect(ctr < expect ? YD_L("Received data with an old sequence number (possible replay)", "古い通し番号のデータを受信（リプレイの疑い）")
+                                           : YD_L("A packet is missing (lost on the way, or removed by an attacker)", "パケットが抜けています（途中で失われたか、攻撃で抜き取られた）"));
+            }
             return;
         }
         g_ydl_stats.rx_frames++;
@@ -625,6 +695,17 @@ static int send_one(const uint8_t *buf, uint16_t len)
     return ble_gatts_notify_custom(s_conn, s_to_recv_val, om);   /* omは成否に関わらず消費される */
 }
 
+/* 1パケットに使える長さ（ATT の MTU と BLE_PKT_MAX の小さいほう） */
+static size_t wire_cap(void)
+{
+    uint16_t mtu = ble_att_mtu(s_conn);
+    size_t wire = BLE_PKT_MAX;
+    if (mtu > 3 && (size_t)mtu - 3 < wire) {
+        wire = (size_t)mtu - 3;
+    }
+    return wire;
+}
+
 static void tx_task(void *arg)
 {
     static pkt_t p;
@@ -645,10 +726,11 @@ static void tx_task(void *arg)
                 g_ydl_stats.tx_dropped++;
                 continue;
             }
+            size_t cap = wire_cap();
             xSemaphoreTake(s_sec_mutex, portMAX_DELAY);
             int n = -1;
             if (s_tx_ctr < UINT32_MAX) {
-                n = yd_sec_seal(s_is_central ? s_keys.k_c2p : s_keys.k_p2c, ++s_tx_ctr, p.buf, p.len, out, sizeof(out));
+                n = yd_sec_seal(s_is_central ? s_keys.k_c2p : s_keys.k_p2c, ++s_tx_ctr, p.buf, p.len, out, cap);
             }
             xSemaphoreGive(s_sec_mutex);
             if (n < 0) {
@@ -674,6 +756,10 @@ static void tx_task(void *arg)
         } else {
             g_ydl_stats.tx_dropped++;
             ESP_LOGW(TAG, YD_L("Send failed rc=%d", "送信失敗 rc=%d"), rc);
+            if (p.kind != PK_RAW && s_up) {
+                /* 通し番号を使ったのに届かなかった。相手は抜けを改ざんとみなすので、先につなぎ直す */
+                link_drop(YD_L("A packet could not be sent", "パケットを送れませんでした"));
+            }
         }
     }
 }
@@ -686,14 +772,13 @@ esp_err_t ydl_ble_send(uint8_t ch, const uint8_t *data, uint16_t len)
     if (!s_up) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (len > BLE_PKT_MAX - 1 - YD_SEC_OVERHEAD) {   /* 16bit の足し算があふれる前に弾く */
+    if (len > BLE_PKT_MAX - 1 - YD_SEC_OVERHEAD - YD_SEC_PAD_MIN) {   /* 16bit の足し算があふれる前に弾く */
         ESP_LOGE(TAG, YD_L("Payload too large len=%u", "ペイロードが大きすぎます len=%u"), len);
         return ESP_ERR_INVALID_SIZE;
     }
-    uint16_t mtu = ble_att_mtu(s_conn);
-    size_t wire = (size_t)len + 1 + YD_SEC_OVERHEAD;
-    if (mtu && wire > (size_t)mtu - 3) {
-        ESP_LOGE(TAG, YD_L("Payload too large len=%u mtu=%u", "ペイロードが大きすぎます len=%u mtu=%u"), len, mtu);
+    size_t cap = wire_cap();
+    if (yd_sec_sealed_len((size_t)len + 1, cap) == 0) {
+        ESP_LOGE(TAG, YD_L("Payload too large len=%u mtu=%u", "ペイロードが大きすぎます len=%u mtu=%u"), len, (unsigned)(cap + 3));
         return ESP_ERR_INVALID_SIZE;
     }
     pkt_t p = { .kind = PK_DATA, .len = len + 1 };
@@ -708,12 +793,8 @@ uint16_t ydl_ble_max_payload(void)
     if (!s_up) {
         return 0;
     }
-    uint16_t mtu = ble_att_mtu(s_conn);
-    uint16_t wire = BLE_PKT_MAX;
-    if (mtu && mtu - 3 < wire) {
-        wire = mtu - 3;
-    }
-    return wire > 1 + YD_SEC_OVERHEAD ? wire - 1 - YD_SEC_OVERHEAD : 0;
+    size_t wire = wire_cap();
+    return wire > 1 + YD_SEC_OVERHEAD + YD_SEC_PAD_MIN ? (uint16_t)(wire - 1 - YD_SEC_OVERHEAD - YD_SEC_PAD_MIN) : 0;
 }
 
 bool ydl_ble_is_up(void)
@@ -816,6 +897,7 @@ static void conn_begin(uint16_t conn)
     struct ble_gap_conn_desc desc;
     s_forget_on_disconnect = false;
     s_conn_authed = false;
+    s_closing = false;
     s_peer_addr_valid = false;
     s_conn_was_bonded = ble_gap_conn_find(conn, &desc) == 0 && peer_is_bonded(&desc.peer_id_addr);
     esp_timer_stop(s_conn_timer);
@@ -1129,6 +1211,11 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, YD_L("Disconnected reason=0x%x", "切断 reason=0x%x"), event->disconnect.reason);
+        if (s_hs_hello_sent && !s_hs_peer_hello && event->disconnect.reason == BLE_HS_HCI_ERR(BLE_ERR_AUTH_FAIL)) {
+            /* v1 の机上ユニットは v2 の HELLO を「形がおかしい」として切るだけで、版を名乗らない */
+            ESP_LOGW(TAG, YD_L("The desk unit refused our HELLO. It may run an older KeyRelay version: update both units (the desk unit first)",
+                               "机上ユニットがこちらの HELLO を受け付けませんでした。古い版の KeyRelay の可能性があります。2台とも更新してください（机上ユニットから）"));
+        }
         forget_failed_peer();
         s_conn = BLE_HS_CONN_HANDLE_NONE;
         s_encrypted = false;
@@ -1254,7 +1341,7 @@ esp_err_t ydl_ble_init(const yd_link_config_t *cfg)
     s_txq = xQueueCreate(TXQ_DEPTH, sizeof(pkt_t));
     s_rxq = xQueueCreate(RXQ_DEPTH, sizeof(pkt_t));
     ESP_RETURN_ON_FALSE(s_txq && s_rxq, ESP_ERR_NO_MEM, TAG, "queue");
-    xTaskCreate(rx_task, "yd_ble_rx", 4096, NULL, 12, NULL);
+    xTaskCreate(rx_task, "yd_ble_rx", 8192, NULL, 12, NULL);   /* X25519（mbedtls）の分も余裕を持たせる */
     xTaskCreate(tx_task, "yd_ble_tx", 4096, NULL, 12, NULL);
 
     if (s_is_central) {

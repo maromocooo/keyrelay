@@ -2,6 +2,8 @@
 #include "yd_sec.h"
 #include "mbedtls/md.h"
 #include "mbedtls/gcm.h"
+#include "mbedtls/ecp.h"
+#include "mbedtls/ecdh.h"
 
 void yd_sec_wipe(void *p, size_t n)
 {
@@ -38,6 +40,117 @@ bool yd_sec_parse_keyfile(const uint8_t *buf, size_t len, uint8_t key_out[YD_SEC
     return true;
 }
 
+/* ======================================================================
+ *  X25519（mbedtls の Curve25519。mbedtls 2.28 と 3.x の両方で動く書き方）
+ * ====================================================================== */
+static int x25519_load_priv(mbedtls_mpi *d, const uint8_t priv[YD_SEC_EPK_LEN])
+{
+    uint8_t k[YD_SEC_EPK_LEN];
+    memcpy(k, priv, sizeof(k));
+    k[0] &= 248;            /* RFC 7748 の clamp */
+    k[31] &= 127;
+    k[31] |= 64;
+    int rc = mbedtls_mpi_read_binary_le(d, k, sizeof(k));
+    yd_sec_wipe(k, sizeof(k));
+    return rc;
+}
+
+int yd_sec_x25519_public(const uint8_t priv[YD_SEC_EPK_LEN], uint8_t pub_out[YD_SEC_EPK_LEN],
+                         yd_sec_rng_t rng, void *rng_ctx)
+{
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d;
+    mbedtls_ecp_point q;
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_ecp_point_init(&q);
+    size_t olen = 0;
+    int rc = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+    if (rc == 0) rc = x25519_load_priv(&d, priv);
+    if (rc == 0) rc = mbedtls_ecp_mul(&grp, &q, &d, &grp.G, rng, rng_ctx);
+    if (rc == 0) rc = mbedtls_ecp_point_write_binary(&grp, &q, MBEDTLS_ECP_PF_UNCOMPRESSED, &olen,
+                                                     pub_out, YD_SEC_EPK_LEN);
+    if (rc == 0 && olen != YD_SEC_EPK_LEN) rc = -1;
+    mbedtls_ecp_point_free(&q);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    if (rc != 0) {
+        yd_sec_wipe(pub_out, YD_SEC_EPK_LEN);
+    }
+    return rc;
+}
+
+int yd_sec_x25519_shared(const uint8_t priv[YD_SEC_EPK_LEN], const uint8_t peer_pub[YD_SEC_EPK_LEN],
+                         uint8_t shared_out[YD_SEC_EPK_LEN], yd_sec_rng_t rng, void *rng_ctx)
+{
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d, z;
+    mbedtls_ecp_point q;
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_mpi_init(&z);
+    mbedtls_ecp_point_init(&q);
+    int rc = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+    if (rc == 0) rc = x25519_load_priv(&d, priv);
+    if (rc == 0) rc = mbedtls_ecp_point_read_binary(&grp, &q, peer_pub, YD_SEC_EPK_LEN);
+    if (rc == 0) rc = mbedtls_ecdh_compute_shared(&grp, &z, &q, &d, rng, rng_ctx);
+    if (rc == 0) rc = mbedtls_mpi_write_binary_le(&z, shared_out, YD_SEC_EPK_LEN);
+    if (rc == 0) {
+        uint8_t acc = 0;     /* 小さい位数の点を渡されると共有値が 0 になる（RFC 7748 §6.1） */
+        for (int i = 0; i < YD_SEC_EPK_LEN; i++) {
+            acc |= shared_out[i];
+        }
+        if (acc == 0) {
+            rc = -1;
+        }
+    }
+    mbedtls_ecp_point_free(&q);
+    mbedtls_mpi_free(&z);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    if (rc != 0) {
+        yd_sec_wipe(shared_out, YD_SEC_EPK_LEN);
+        return -1;
+    }
+    return 0;
+}
+
+/* ======================================================================
+ *  HELLO
+ * ====================================================================== */
+void yd_sec_hello_build(uint8_t out[YD_SEC_HELLO_LEN], uint8_t role, const uint8_t nonce[YD_SEC_NONCE_LEN],
+                        const uint8_t epk[YD_SEC_EPK_LEN])
+{
+    out[0] = YD_SEC_T_HELLO;
+    out[1] = YD_SEC_VERSION;
+    out[2] = role;
+    memcpy(out + 3, nonce, YD_SEC_NONCE_LEN);
+    memcpy(out + 3 + YD_SEC_NONCE_LEN, epk, YD_SEC_EPK_LEN);
+}
+
+int yd_sec_hello_parse(const uint8_t *in, size_t len, uint8_t expect_role, uint8_t nonce_out[YD_SEC_NONCE_LEN],
+                       uint8_t epk_out[YD_SEC_EPK_LEN], uint8_t *peer_ver)
+{
+    if (len < 2 || in[0] != YD_SEC_T_HELLO) {
+        return YD_SEC_HELLO_MALFORMED;
+    }
+    if (in[1] != YD_SEC_VERSION) {
+        if (peer_ver) {
+            *peer_ver = in[1];
+        }
+        return YD_SEC_HELLO_VERSION;
+    }
+    if (len != YD_SEC_HELLO_LEN || in[2] != expect_role) {
+        return YD_SEC_HELLO_MALFORMED;
+    }
+    memcpy(nonce_out, in + 3, YD_SEC_NONCE_LEN);
+    memcpy(epk_out, in + 3 + YD_SEC_NONCE_LEN, YD_SEC_EPK_LEN);
+    return YD_SEC_HELLO_OK;
+}
+
+/* ======================================================================
+ *  鍵の導出と相互認証
+ * ====================================================================== */
 static int hmac256(const uint8_t *key, size_t klen, const uint8_t *in, size_t ilen, uint8_t out[32])
 {
     const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
@@ -60,15 +173,23 @@ static int hkdf_expand1(const uint8_t prk[32], const char *info, uint8_t out[32]
 }
 
 int yd_sec_derive(const uint8_t psk[YD_SEC_KEY_LEN], const uint8_t nc[YD_SEC_NONCE_LEN],
-                  const uint8_t np[YD_SEC_NONCE_LEN], yd_sec_keys_t *out)
+                  const uint8_t np[YD_SEC_NONCE_LEN], const uint8_t epk_c[YD_SEC_EPK_LEN],
+                  const uint8_t epk_p[YD_SEC_EPK_LEN], const uint8_t dh[YD_SEC_EPK_LEN], yd_sec_keys_t *out)
 {
-    uint8_t salt[2 * YD_SEC_NONCE_LEN], prk[32];
+    /* salt = nc ‖ np ‖ epk_c ‖ epk_p（やり取りした値をすべて鍵に結び付ける）
+     * IKM  = PSK ‖ X25519 の共有値（PSK だけ、共有値だけでは鍵にならない） */
+    uint8_t salt[2 * YD_SEC_NONCE_LEN + 2 * YD_SEC_EPK_LEN], ikm[YD_SEC_KEY_LEN + YD_SEC_EPK_LEN], prk[32];
     memcpy(salt, nc, YD_SEC_NONCE_LEN);
     memcpy(salt + YD_SEC_NONCE_LEN, np, YD_SEC_NONCE_LEN);
-    int rc = hmac256(salt, sizeof(salt), psk, YD_SEC_KEY_LEN, prk);            /* Extract */
-    if (rc == 0) rc = hkdf_expand1(prk, "keyrelay v1 c2p", out->k_c2p);
-    if (rc == 0) rc = hkdf_expand1(prk, "keyrelay v1 p2c", out->k_p2c);
-    if (rc == 0) rc = hkdf_expand1(prk, "keyrelay v1 auth", out->k_auth);
+    memcpy(salt + 2 * YD_SEC_NONCE_LEN, epk_c, YD_SEC_EPK_LEN);
+    memcpy(salt + 2 * YD_SEC_NONCE_LEN + YD_SEC_EPK_LEN, epk_p, YD_SEC_EPK_LEN);
+    memcpy(ikm, psk, YD_SEC_KEY_LEN);
+    memcpy(ikm + YD_SEC_KEY_LEN, dh, YD_SEC_EPK_LEN);
+    int rc = hmac256(salt, sizeof(salt), ikm, sizeof(ikm), prk);            /* Extract */
+    if (rc == 0) rc = hkdf_expand1(prk, "keyrelay v2 c2p", out->k_c2p);
+    if (rc == 0) rc = hkdf_expand1(prk, "keyrelay v2 p2c", out->k_p2c);
+    if (rc == 0) rc = hkdf_expand1(prk, "keyrelay v2 auth", out->k_auth);
+    yd_sec_wipe(ikm, sizeof(ikm));
     yd_sec_wipe(prk, sizeof(prk));
     if (rc != 0) {
         yd_sec_wipe(out, sizeof(*out));
@@ -94,6 +215,9 @@ int yd_sec_auth_mac(const yd_sec_keys_t *k, uint8_t role, const uint8_t nc[YD_SE
     return rc;
 }
 
+/* ======================================================================
+ *  データ（AES-256-GCM ＋ 埋め草）
+ * ====================================================================== */
 static void make_iv(uint32_t ctr, uint8_t iv[12])
 {
     memset(iv, 0, 12);
@@ -103,12 +227,41 @@ static void make_iv(uint32_t ctr, uint8_t iv[12])
     iv[11] = (uint8_t)ctr;
 }
 
+/* 埋めた後の平文の長さ。入らないときは 0 */
+static size_t padded_len(size_t pt_len, size_t out_cap)
+{
+    if (out_cap <= YD_SEC_OVERHEAD) {
+        return 0;
+    }
+    size_t lim = out_cap - YD_SEC_OVERHEAD;
+    if (lim > YD_SEC_MAX_PT) {
+        lim = YD_SEC_MAX_PT;
+    }
+    size_t need = pt_len + YD_SEC_PAD_MIN;
+    if (need > lim) {
+        return 0;
+    }
+    size_t p = (need + YD_SEC_PAD_BLOCK - 1) / YD_SEC_PAD_BLOCK * YD_SEC_PAD_BLOCK;
+    return p > lim ? lim : p;
+}
+
+size_t yd_sec_sealed_len(size_t pt_len, size_t out_cap)
+{
+    size_t p = padded_len(pt_len, out_cap);
+    return p ? p + YD_SEC_OVERHEAD : 0;
+}
+
 int yd_sec_seal(const uint8_t key[YD_SEC_KEY_LEN], uint32_t ctr, const uint8_t *pt, size_t pt_len,
                 uint8_t *out, size_t out_cap)
 {
-    if (ctr == 0 || out_cap < pt_len + YD_SEC_OVERHEAD) {
+    size_t plen = padded_len(pt_len, out_cap);
+    if (ctr == 0 || plen == 0) {
         return -1;
     }
+    uint8_t buf[YD_SEC_MAX_PT];
+    memcpy(buf, pt, pt_len);
+    buf[pt_len] = 0x80;                                   /* ISO/IEC 7816-4 の埋め方: 0x80 のあと 0x00 */
+    memset(buf + pt_len + 1, 0, plen - pt_len - 1);
     out[0] = YD_SEC_T_DATA;
     out[1] = (uint8_t)(ctr >> 24);
     out[2] = (uint8_t)(ctr >> 16);
@@ -120,17 +273,18 @@ int yd_sec_seal(const uint8_t key[YD_SEC_KEY_LEN], uint32_t ctr, const uint8_t *
     mbedtls_gcm_init(&g);
     int rc = mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, key, 256);
     if (rc == 0) {
-        rc = mbedtls_gcm_crypt_and_tag(&g, MBEDTLS_GCM_ENCRYPT, pt_len, iv, sizeof(iv), out, YD_SEC_DATA_HDR,
-                                       pt, out + YD_SEC_DATA_HDR, YD_SEC_TAG_LEN, out + YD_SEC_DATA_HDR + pt_len);
+        rc = mbedtls_gcm_crypt_and_tag(&g, MBEDTLS_GCM_ENCRYPT, plen, iv, sizeof(iv), out, YD_SEC_DATA_HDR,
+                                       buf, out + YD_SEC_DATA_HDR, YD_SEC_TAG_LEN, out + YD_SEC_DATA_HDR + plen);
     }
     mbedtls_gcm_free(&g);
-    return rc == 0 ? (int)(pt_len + YD_SEC_OVERHEAD) : -1;
+    yd_sec_wipe(buf, plen);
+    return rc == 0 ? (int)(plen + YD_SEC_OVERHEAD) : -1;
 }
 
 int yd_sec_open(const uint8_t key[YD_SEC_KEY_LEN], const uint8_t *in, size_t in_len,
                 uint32_t *ctr_out, uint8_t *pt, size_t pt_cap)
 {
-    if (in_len < YD_SEC_OVERHEAD || in[0] != YD_SEC_T_DATA) {
+    if (in_len < YD_SEC_OVERHEAD + YD_SEC_PAD_MIN || in[0] != YD_SEC_T_DATA) {
         return -1;
     }
     size_t n = in_len - YD_SEC_OVERHEAD;
@@ -152,6 +306,15 @@ int yd_sec_open(const uint8_t key[YD_SEC_KEY_LEN], const uint8_t *in, size_t in_
         yd_sec_wipe(pt, n);
         return -1;
     }
+    /* 埋め草を外す（タグの確認が済んでからなので、ここで失敗しても中身の手がかりは出ない） */
+    size_t i = n;
+    while (i > 0 && pt[i - 1] == 0x00) {
+        i--;
+    }
+    if (i == 0 || pt[i - 1] != 0x80) {
+        yd_sec_wipe(pt, n);
+        return -1;
+    }
     *ctr_out = ctr;
-    return (int)n;
+    return (int)(i - 1);
 }
