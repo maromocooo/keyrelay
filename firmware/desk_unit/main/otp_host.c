@@ -5,10 +5,16 @@
  * （ブートプロトコルの形: [修飾キー, 0, キー1..キー6]）。
  *
  * BLE の遅れで「押す」と「離す」の間が空くと、Mac がキーリピートを始めて同じ文字が何個も入ってしまう。
- * そこで「全部のキーが離された」レポートが来るまで手元に溜め、押す〜離すをひとまとめにして送る。
- * レシーバーはまとまりの中を USB の速さで続けて流すので、キーを押したまま BLE を待つことがない。
+ * そこでレポートを手元に溜め、「離した」ところで区切って送る（otp_batch.h）。レシーバーはまとまりの中を
+ * USB の速さで続けて流すので、キーを押したまま BLE を待つことがない。
  *
- *   YD_CH_OTP のペイロード = レポート(8バイト) × N
+ * 電波から文字数（静的パスワードの長さなど）が分からないように、タッチ1回分は「決まった間隔・決まった数・
+ * 同じ大きさ」のパケット列で送る。最初のレポートが来たら、TICK_MS ごとに1パケット、少なくとも
+ * SESSION_TICKS 回送る。中身は、その時点で溜まっている分（足りない分は「全部離す」のレポートで埋める。
+ * レシーバーは続く「全部離す」を1つにまとめる）。打ち終わるのが遅れる（キーの pacing 設定など）と
+ * そのぶん続け、そのときだけ長さが見える。送るのは otp_tx タスクだけなので、順番は入れ替わらない。
+ *
+ *   YD_CH_OTP のペイロード = レポート(8バイト) × rpp（MTU から決まる。247 なら 24）
  *
  * ---- フィーチャーレポート（v7） ----
  * チャレンジレスポンス（KeePassXC など）やスロット設定（ykman otp）は、キーボードの口への
@@ -25,13 +31,17 @@
 #include "esp_timer.h"
 #include "yd_link.h"
 #include "otp_host.h"
+#include "otp_batch.h"
 #include "yd_lang.h"
 
 static const char *TAG = "otp";
 
-#define REPORT_LEN     8
-#define BATCH_MAX      24          /* 1回で送るレポート数の上限（8×24 = 192バイト） */
-#define PRESS_FLUSH_MS 100         /* 押したままのレポートがこれだけ溜まっていたら、離されなくても送る */
+#define REPORT_LEN      OTPB_REPORT_LEN
+#define RPP_MAX         24          /* 1パケットのレポート数の上限（8×24 = 192バイト） */
+#define TICK_MS         50          /* タッチ1回分のパケットを送る間隔 */
+#define SESSION_TICKS   40          /* 少なくともこの回数送る（50ms×40 = 2秒。Yubico OTP の入力より長い） */
+#define IDLE_END_MS     150         /* 最後のレポートからこれだけ空いたら入力が終わったとみなす（pacing 60ms より長く） */
+#define PRESS_FORCE_MS  300         /* 押したまま、これだけ離されなければ（異常時）途中まで送る */
 
 #define CTL_TIMEOUT_MS 1000
 
@@ -56,51 +66,95 @@ static struct {
     volatile bool attached;
 } o = { .itf = -1 };
 
-/* usb_client タスクだけが触る */
-static uint8_t s_batch[BATCH_MAX * REPORT_LEN];
-static int s_nrep;
-static int64_t s_first_us;
-static uint32_t s_chars;
+/* in_cb（usb_client タスク）が足し、otp_tx タスクが取り出す。s_ring_mutex で守る */
+static otpb_ring_t s_ring;
+static bool s_session;              /* otp_tx タスクがパケット列を送っている */
+static bool s_last_released = true;
+static bool s_last_zero = true;     /* 最後に溜めたレポートが全部 0（何も押していない） */
+static int64_t s_last_us;
+static uint32_t s_chars, s_overflow;
+static SemaphoreHandle_t s_ring_mutex;
+static TaskHandle_t s_tx_task;
 
-static bool keys_released(const uint8_t *r)
+/* タッチ1回分を、決まった間隔・数・大きさのパケット列で送る */
+static void otp_tx_task(void *arg)
 {
-    for (int i = 2; i < REPORT_LEN; i++) {
-        if (r[i]) {
-            return false;
+    static uint8_t pkt[RPP_MAX * REPORT_LEN];
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);          /* 入力の始まり */
+        TickType_t wake = xTaskGetTickCount();
+        int ticks = 0;
+        bool warned = false;
+        for (;;) {
+            vTaskDelayUntil(&wake, pdMS_TO_TICKS(TICK_MS));
+            ticks++;
+            int rpp = yd_link_max_payload() / REPORT_LEN;
+            if (rpp > RPP_MAX) {
+                rpp = RPP_MAX;
+            }
+            memset(pkt, 0, sizeof(pkt));
+            xSemaphoreTake(s_ring_mutex, portMAX_DELAY);
+            int64_t idle_ms = (esp_timer_get_time() - s_last_us) / 1000;
+            int n = rpp > 0 ? otpb_take(&s_ring, pkt, rpp, !s_last_released && idle_ms > PRESS_FORCE_MS) : 0;
+            bool done = ticks >= SESSION_TICKS && s_ring.count == 0 && idle_ms >= IDLE_END_MS;
+            if (done) {
+                s_session = false;        /* in_cb は同じ mutex の中でこれを見るので、取り残しは出ない */
+            }
+            if (rpp <= 0 && s_ring.count) {
+                otpb_init(&s_ring);       /* リンクがない。溜めても送れないので捨てる */
+            }
+            xSemaphoreGive(s_ring_mutex);
+            if (rpp > 0) {
+                esp_err_t err = ESP_FAIL;
+                for (int retry = 0; retry < 5; retry++) {
+                    err = yd_link_send(YD_CH_OTP, pkt, (uint16_t)(rpp * REPORT_LEN));
+                    if (err != ESP_ERR_TIMEOUT) {
+                        break;
+                    }
+                }
+                if (err != ESP_OK && n > 0) {
+                    ESP_LOGW(TAG, YD_L("Send to the receiver failed (%s). Dropped %d key reports", "レシーバーへの送信失敗 (%s)。キー入力 %d 件を破棄"), esp_err_to_name(err), n);
+                }
+            } else if (!warned) {
+                warned = true;
+                ESP_LOGW(TAG, YD_L("No link to the receiver: key input dropped", "レシーバーとつながっていないので、キー入力を捨てました"));
+            }
+            if (done) {
+                break;
+            }
         }
     }
-    return true;
-}
-
-static void flush(void)
-{
-    if (s_nrep == 0) {
-        return;
-    }
-    esp_err_t err = yd_link_send(YD_CH_OTP, s_batch, (uint16_t)(s_nrep * REPORT_LEN));
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, YD_L("Send to the receiver failed (%s). Dropped %d key reports", "レシーバーへの送信失敗 (%s)。キー入力 %d 件を破棄"), esp_err_to_name(err), s_nrep);
-    }
-    s_nrep = 0;
 }
 
 static void in_cb(usb_transfer_t *x)
 {
     if (x->status == USB_TRANSFER_STATUS_COMPLETED && x->actual_num_bytes >= REPORT_LEN) {
         const uint8_t *r = x->data_buffer;
-        if (s_nrep == 0) {
-            s_first_us = esp_timer_get_time();
+        bool released = otpb_released(r);
+        bool zero = released && r[0] == 0 && r[1] == 0;
+        xSemaphoreTake(s_ring_mutex, portMAX_DELAY);
+        bool redundant = zero && s_last_zero;  /* 何も押していないところに「全部 0」。送らなくてよい */
+        bool ok = redundant || otpb_push(&s_ring, r);
+        if (ok && !redundant) {
+            s_last_released = released;
+            s_last_zero = zero;
+            s_last_us = esp_timer_get_time();
+        } else if (!ok) {
+            s_overflow++;
         }
-        memcpy(&s_batch[s_nrep * REPORT_LEN], r, REPORT_LEN);
-        s_nrep++;
-        bool released = keys_released(r);
+        bool start = ok && !redundant && !s_session;
+        if (start) {
+            s_session = true;
+        }
+        xSemaphoreGive(s_ring_mutex);
+        if (start) {
+            xTaskNotifyGive(s_tx_task);
+        }
+        if (!ok) {
+            ESP_LOGW(TAG, YD_L("Key input buffer full: report dropped (%" PRIu32 ")", "キー入力のバッファが一杯でレポートを捨てました（%" PRIu32 "）"), s_overflow);
+        }
         if (!released) {
             s_chars++;
-        }
-        /* 離されたら送る。溜まりすぎ・押したまま長すぎ（異常時）も送る */
-        if (released || s_nrep >= BATCH_MAX ||
-            esp_timer_get_time() - s_first_us > (int64_t)PRESS_FLUSH_MS * 1000) {
-            flush();
         }
         if (released && s_chars) {
             static int64_t last_log;
@@ -153,7 +207,10 @@ bool otph_attach(usb_host_client_handle_t client, usb_device_handle_t dev, const
     o.itf = itf->bInterfaceNumber;
     o.ep = ep_in;
     o.mps = mps;
-    s_nrep = 0;
+    xSemaphoreTake(s_ring_mutex, portMAX_DELAY);
+    otpb_init(&s_ring);
+    s_last_released = s_last_zero = true;
+    xSemaphoreGive(s_ring_mutex);
     s_chars = 0;
     o.xin->device_handle = dev;
     o.xin->bEndpointAddress = ep_in;
@@ -188,7 +245,10 @@ void otph_detach(void)
     usb_host_interface_release(o.client, o.dev, o.itf);
     o.itf = -1;
     o.dev = NULL;
-    s_nrep = 0;
+    xSemaphoreTake(s_ring_mutex, portMAX_DELAY);
+    otpb_init(&s_ring);               /* 送っている途中なら、残りは「全部離す」だけのパケットになる */
+    s_last_released = s_last_zero = true;
+    xSemaphoreGive(s_ring_mutex);
 }
 
 bool otph_present(void)
@@ -299,6 +359,9 @@ void otph_init(void)
     s_ctl_q = xQueueCreate(32, sizeof(ctl_req_t));
     s_ctl_done = xSemaphoreCreateBinary();
     s_ctl_mutex = xSemaphoreCreateMutex();
-    configASSERT(s_ctl_q && s_ctl_done && s_ctl_mutex);
+    s_ring_mutex = xSemaphoreCreateMutex();
+    configASSERT(s_ctl_q && s_ctl_done && s_ctl_mutex && s_ring_mutex);
+    otpb_init(&s_ring);
+    xTaskCreatePinnedToCore(otp_tx_task, "otp_tx", 3072, NULL, 9, &s_tx_task, 0);
     xTaskCreatePinnedToCore(ctl_task, "otp_ctl", 3072, NULL, 8, NULL, 0);
 }

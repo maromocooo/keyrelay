@@ -11,10 +11,13 @@ test_sec: test_sec.c $(LINK)/yd_sec.c sec_vectors.h
 	$(CC) $(CFLAGS) -I $(LINK) -o $@ test_sec.c $(LINK)/yd_sec.c -lmbedcrypto
 test_bond_policy: test_bond_policy.c $(LINK)/yd_bond_policy.h
 	$(CC) $(CFLAGS) -I $(LINK) -o $@ test_bond_policy.c
-test: test_frag test_sec test_bond_policy
+test_otp_batch: test_otp_batch.c ../../desk_unit/main/otp_batch.h
+	$(CC) $(CFLAGS) -I ../../desk_unit/main -o $@ test_otp_batch.c
+test: test_frag test_sec test_bond_policy test_otp_batch
 	./test_frag
 	./test_sec
 	./test_bond_policy
+	./test_otp_batch
 clean:
-	rm -f test_frag test_sec test_bond_policy
+	rm -f test_frag test_sec test_bond_policy test_otp_batch
 .PHONY: all test clean

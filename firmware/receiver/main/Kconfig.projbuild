@@ -12,4 +12,30 @@ config YD_OTP_KEYBOARD
         OTP（タッチでの入力）を使わないなら n。レシーバーからキーボードの口がなくなり、
         SECURITY.md の「キー入力の差し込み」の危険がなくなる。
 
+choice YD_OTP_KBD_FILTER
+    prompt "Keys the OTP keyboard may type"
+    depends on YD_OTP_KEYBOARD
+    default YD_OTP_KBD_FILTER_MODHEX
+    help
+        What the receiver is allowed to type when key reports arrive from the desk unit.
+
+        "Yubico OTP only" types nothing but the 16 ModHex letters and Enter, without modifier keys.
+        That is all a Yubico OTP (the factory setting of slot 1) contains. Someone who stole the
+        pairing key and poses as your desk unit can then not type commands on your computer.
+
+        Choose "Any key" if a slot types a static password, an OATH-HOTP code (digits) or uses the
+        Tab options.
+
+        既定の「Yubico OTP only」は、ModHex の16文字と Enter（修飾キーなし）しか打たない。
+        Yubico OTP（スロット1の出荷時の設定）はこれだけでできている。ペアリング用の鍵を盗んで
+        机上ユニットになりすました相手に、コマンドなどを打ち込まれないようにするため。
+        静的パスワード・OATH-HOTP（数字）・Tab の設定を使うスロットがあるなら「Any key」にする。
+
+    config YD_OTP_KBD_FILTER_MODHEX
+        bool "Yubico OTP only (ModHex letters and Enter)"
+
+    config YD_OTP_KBD_FILTER_NONE
+        bool "Any key (static passwords, OATH-HOTP, Tab)"
+endchoice
+
 endmenu
