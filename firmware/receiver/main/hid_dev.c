@@ -8,6 +8,11 @@
  * 机上ユニットから「押す〜離す」のまとまりで届くレポートを、間を空けずに Mac へ流す。
  * 押されたまま KBD_STUCK_MS 続きが来なければ自分で「離す」を送る（キーリピート防止）。
  * 新しいタッチの最初に「英数」キーを送って、日本語入力のままでも化けないようにする（YD_OTP_FORCE_EISU）。
+ * 机上ユニットは長さをそろえるために「全部離す」で埋めて送ってくるので、続く「全部離す」は1つにまとめる。
+ *
+ * 既定（CONFIG_YD_OTP_KBD_FILTER_MODHEX）では、Yubico OTP に出てくるキー（ModHex の16文字と Enter、
+ * 修飾キーなし）しか打たない。PSK を盗んで机上ユニットになりすました相手が、任意のキー入力
+ * （コマンドなど）を打ち込むのを防ぐため（SECURITY.md）。
  *
  * ---- フィーチャーレポート ----
  *   Mac ──SET_REPORT(Feature)──▶ すぐ受け付けて、机上ユニットへ [SET, data]
@@ -18,6 +23,7 @@
  * ほうが「回数」で待つので、BLE の往復で1回あたり数十ms かかっても動く。
  */
 #include <string.h>
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -102,6 +108,8 @@ static QueueHandle_t s_kbd_q, s_ctl_q;
 static TaskHandle_t s_ctl_task;
 static volatile bool s_kbd_on, s_ctl_on;
 static uint32_t s_ctl_count;
+static uint32_t s_kbd_blocked;
+static bool s_kbd_q_zero = true;    /* 最後にキューに入れたレポートが全部 0（rx_task だけが触る） */
 
 static inline int64_t now_ms(void)
 {
@@ -395,10 +403,57 @@ static bool kbd_has_keys(const uint8_t *d)
     return false;
 }
 
+static bool kbd_all_zero(const uint8_t *d)
+{
+    for (int i = 0; i < KBD_REPORT_LEN; i++) {
+        if (d[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+#if CONFIG_YD_OTP_KBD_FILTER_MODHEX
+/* Yubico OTP（ModHex: c b d e f g h i j k l n r t u v）と Enter の HID 使用コード */
+static bool kbd_key_allowed(uint8_t k)
+{
+    switch (k) {
+    case 0x05: case 0x06: case 0x07: case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C:   /* b c d e f g h i */
+    case 0x0D: case 0x0E: case 0x0F: case 0x11: case 0x15: case 0x17: case 0x18: case 0x19:   /* j k l n r t u v */
+    case 0x28:                                                                                  /* Enter */
+        return true;
+    default:
+        return false;
+    }
+}
+#endif
+
+/* 打ってよいレポートか（「全部離す」はいつも可） */
+static bool kbd_report_allowed(const uint8_t *d)
+{
+#if CONFIG_YD_OTP_KBD_FILTER_MODHEX
+    if (kbd_all_zero(d)) {
+        return true;
+    }
+    if (d[0] != 0) {
+        return false;                   /* Shift / Ctrl / Cmd などの修飾キー */
+    }
+    for (int i = 2; i < KBD_REPORT_LEN; i++) {
+        if (d[i] && !kbd_key_allowed(d[i])) {
+            return false;
+        }
+    }
+    return true;
+#else
+    (void)d;
+    return true;
+#endif
+}
+
 static void kbd_task(void *arg)
 {
     kbd_rep_t r;
-    bool pressed = false, first = true;
+    bool pressed = false, first = true, sent_zero = true;
     TickType_t last = 0;
     for (;;) {
         if (xQueueReceive(s_kbd_q, &r, pressed ? pdMS_TO_TICKS(KBD_STUCK_MS) : portMAX_DELAY) != pdTRUE) {
@@ -406,7 +461,12 @@ static void kbd_task(void *arg)
             ESP_LOGW(TAG, YD_L("Key held without further reports: releasing", "キーが押されたまま続きが来ないので離します"));
             kbd_send(zero);
             pressed = false;
+            sent_zero = true;
             continue;
+        }
+        bool zero = kbd_all_zero(r.d);
+        if (zero && sent_zero) {
+            continue;                   /* 埋め草（続けて来る「全部離す」） */
         }
 #if YD_OTP_FORCE_EISU
         if (kbd_has_keys(r.d) && (first || (xTaskGetTickCount() - last) > pdMS_TO_TICKS(KBD_BURST_GAP_MS))) {
@@ -421,6 +481,7 @@ static void kbd_task(void *arg)
         if (!kbd_send(r.d)) {
             ESP_LOGW(TAG, YD_L("Keyboard send timed out (not connected to the host?)", "キーボードの送信待ちタイムアウト（Macに未接続？）"));
         }
+        sent_zero = zero;
         pressed = kbd_has_keys(r.d);
         last = xTaskGetTickCount();
         first = false;
@@ -481,13 +542,32 @@ void hid_dev_set_otp_caps(bool kbd, bool ctl)
 
 void hid_dev_kbd_from_link(const uint8_t *data, uint16_t len)
 {
-    if (len < KBD_REPORT_LEN || len % KBD_REPORT_LEN) {
-        return;
+    if (!s_kbd_on || len < KBD_REPORT_LEN || len % KBD_REPORT_LEN) {
+        return;                         /* 机上ユニットが OTP キーボードありと言っていないのに届いた分も捨てる */
     }
     for (uint16_t off = 0; off < len; off += KBD_REPORT_LEN) {
         kbd_rep_t r;
         memcpy(r.d, data + off, KBD_REPORT_LEN);
-        if (xQueueSend(s_kbd_q, &r, pdMS_TO_TICKS(100)) != pdTRUE) {
+        if (!kbd_report_allowed(r.d)) {
+            static int64_t last_log;
+            s_kbd_blocked++;
+            if (now_ms() - last_log > 2000) {
+                last_log = now_ms();
+                ESP_LOGW(TAG, YD_L("Blocked a key report that a Yubico OTP never contains (modifiers 0x%02x, key 0x%02x; %" PRIu32 " so far). "
+                                   "For static passwords or OATH-HOTP, build with CONFIG_YD_OTP_KBD_FILTER_NONE",
+                                   "Yubico OTP には出てこないキー入力を止めました（修飾キー 0x%02x、キー 0x%02x、累計 %" PRIu32 " 件）。"
+                                   "静的パスワードや OATH-HOTP を使うなら CONFIG_YD_OTP_KBD_FILTER_NONE でビルドしてください"),
+                         r.d[0], r.d[2], s_kbd_blocked);
+            }
+            continue;
+        }
+        bool zero = kbd_all_zero(r.d);
+        if (zero && s_kbd_q_zero) {
+            continue;                   /* 机上ユニットが長さをそろえるために入れた埋め草 */
+        }
+        /* rx_task（BLE 受信）を止めないように待たない。あふれた分は捨てる（押したままは KBD_STUCK_MS で離す） */
+        s_kbd_q_zero = zero;
+        if (xQueueSend(s_kbd_q, &r, 0) != pdTRUE) {
             ESP_LOGW(TAG, YD_L("Keyboard queue full: input dropped", "キーボードのキューが一杯。入力を破棄"));
             break;
         }
