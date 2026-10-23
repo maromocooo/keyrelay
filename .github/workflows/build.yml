@@ -18,6 +18,15 @@ jobs:
       - name: Host unit tests (fragmentation, link security, bond policy)
         run: make -C firmware/tests/host
 
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang, libFuzzer and mbedtls
+        run: sudo apt-get update && sudo apt-get install -y clang-18 libclang-rt-18-dev libmbedtls-dev
+      - name: Fuzz the link input (HELLO, X25519, AES-GCM + padding) and the fragment reassembly
+        run: make -C firmware/tests/fuzz run CC=clang-18 FUZZ_SECONDS=60
+
   firmware:
     runs-on: ubuntu-latest
     container: espressif/idf:v5.4.4
