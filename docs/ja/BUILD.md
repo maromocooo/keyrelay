@@ -163,6 +163,8 @@ esptool.py --chip esp32s3 -p ポート write_flash 0x0 firmware/receiver/build/k
 
 数秒で2台が BLE でつながります。キーの LED が点き、机上ユニットのログに、キーのインターフェース
 （FIDO・CCID・OTP キーボード）を掴んだことと、BLE がつながったことが出ます。
+ログは英語です（例: `▶ BLE link up`）。日本語にしたいときは、ビルドの前に2つのプロジェクトとも
+`idf.py menuconfig` → KeyRelay log language で Japanese を選びます。
 
 確認は次の順で:
 

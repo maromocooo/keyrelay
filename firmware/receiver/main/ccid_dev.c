@@ -22,6 +22,7 @@
 #include "yd_frag.h"
 #include "yd_ccid.h"
 #include "ccid_dev.h"
+#include "yd_lang.h"
 
 static const char *TAG = "ccid";
 
@@ -76,7 +77,7 @@ static inline void kick(void)
  * ====================================================================== */
 static void out_drop(const char *why)
 {
-    ESP_LOGW(TAG, "Macからのメッセージを破棄: %s", why);
+    ESP_LOGW(TAG, YD_L("Dropping message from the host: %s", "Macからのメッセージを破棄: %s"), why);
     s_out_len = 0;
 }
 
@@ -90,12 +91,12 @@ static void out_packet(const uint8_t *p, uint32_t n)
     }
     if (n == 0) {
         if (s_out_len) {
-            out_drop("長さが足りない");
+            out_drop(YD_L("too short", "長さが足りない"));
         }
         return;
     }
     if (s_out_len + n > sizeof(s_out_msg)) {
-        out_drop("長すぎる");
+        out_drop(YD_L("too long", "長すぎる"));
         s_out_discard = (n == CCID_EP_MPS);
         return;
     }
@@ -104,14 +105,14 @@ static void out_packet(const uint8_t *p, uint32_t n)
     if (s_out_len >= YD_CCID_HDR) {
         uint32_t dl = yd_ccid_dwlen(s_out_msg);
         if (dl > YD_CCID_MAX_MSG - YD_CCID_HDR) {
-            out_drop("dwLength が上限超え");
+            out_drop(YD_L("dwLength over the limit", "dwLength が上限超え"));
             s_out_discard = (n == CCID_EP_MPS);
             return;
         }
         size_t total = YD_CCID_HDR + dl;
         if (s_out_len >= total) {
             if (xMessageBufferSend(s_host_mb, s_out_msg, total, 0) != total) {
-                ESP_LOGW(TAG, "要求キューが一杯のため破棄");
+                ESP_LOGW(TAG, YD_L("Request queue full: dropped", "要求キューが一杯のため破棄"));
             }
             s_out_len = 0;
             kick();
@@ -119,7 +120,7 @@ static void out_packet(const uint8_t *p, uint32_t n)
         }
     }
     if (n < CCID_EP_MPS) {
-        out_drop("途中で終わった");
+        out_drop(YD_L("truncated", "途中で終わった"));
     }
 }
 
@@ -238,7 +239,7 @@ static bool in_xfer(uint16_t len)
         return false;
     }
     if (xSemaphoreTake(s_in_sem, pdMS_TO_TICKS(IN_TIMEOUT_MS)) != pdTRUE) {
-        ESP_LOGW(TAG, "Macが応答を読み取りません");
+        ESP_LOGW(TAG, YD_L("The host is not reading the response", "Macが応答を読み取りません"));
         return false;
     }
     return s_in_result == XFER_RESULT_SUCCESS;
@@ -259,7 +260,7 @@ static bool send_to_mac(const uint8_t *msg, size_t n)
         vTaskDelay(pdMS_TO_TICKS(20));
     }
     if (!claimed) {
-        ESP_LOGW(TAG, "bulk IN が空かないため応答を破棄 (type=0x%02x)", msg[0]);
+        ESP_LOGW(TAG, YD_L("bulk IN stays busy: dropping response (type=0x%02x)", "bulk IN が空かないため応答を破棄 (type=0x%02x)"), msg[0]);
         return false;
     }
     memcpy(s_in_buf, msg, n);
@@ -332,7 +333,7 @@ static void fail_pending(const char *why)
     if (!s_pend.active) {
         return;
     }
-    ESP_LOGW(TAG, "%s seq=%u を失敗で返します（%s）", type_name(s_pend.type), s_pend.seq, why);
+    ESP_LOGW(TAG, YD_L("Failing %s seq=%u (%s)", "%s seq=%u を失敗で返します（%s）"), type_name(s_pend.type), s_pend.seq, why);
     reply_local(s_pend.hdr, CCID_CMD_FAILED | (s_card ? CCID_ICC_ACTIVE : CCID_ICC_ABSENT), CCID_ERR_ICC_MUTE);
     s_pend.active = false;
 }
@@ -340,7 +341,7 @@ static void fail_pending(const char *why)
 static void handle_host(const uint8_t *m, size_t n, bool card)
 {
     if (!yd_ccid_valid(m, n)) {
-        ESP_LOGW(TAG, "形式不正のメッセージを破棄 (len=%u)", (unsigned)n);
+        ESP_LOGW(TAG, YD_L("Dropping malformed message (len=%u)", "形式不正のメッセージを破棄 (len=%u)"), (unsigned)n);
         return;
     }
     uint8_t type = m[0], seq = m[6];
@@ -352,11 +353,11 @@ static void handle_host(const uint8_t *m, size_t n, bool card)
         uint8_t r[YD_CCID_HDR];
         yd_ccid_make_absent_resp(m, r);
         send_to_mac(r, sizeof(r));
-        ESP_LOGD(TAG, "%s: YubiKeyなしとして応答", type_name(type));
+        ESP_LOGD(TAG, YD_L("%s: replying as no key present", "%s: YubiKeyなしとして応答"), type_name(type));
         return;
     }
     if (s_pend.active && type != CCID_PC_ABORT) {
-        ESP_LOGW(TAG, "処理中に %s が届いたので「使用中」で返します", type_name(type));
+        ESP_LOGW(TAG, YD_L("%s received while busy: replying \"busy\"", "処理中に %s が届いたので「使用中」で返します"), type_name(type));
         reply_local(m, CCID_CMD_FAILED | CCID_ICC_ACTIVE, CCID_ERR_SLOT_BUSY);
         return;
     }
@@ -365,7 +366,7 @@ static void handle_host(const uint8_t *m, size_t n, bool card)
         uint8_t r[YD_CCID_HDR];
         yd_ccid_make_absent_resp(m, r);
         send_to_mac(r, sizeof(r));
-        ESP_LOGW(TAG, "%s を机上ユニットへ送れませんでした (%s)", type_name(type), esp_err_to_name(err));
+        ESP_LOGW(TAG, YD_L("Could not send %s to the desk unit (%s)", "%s を机上ユニットへ送れませんでした (%s)"), type_name(type), esp_err_to_name(err));
         return;
     }
     int64_t t = now_ms();
@@ -381,23 +382,23 @@ static void handle_host(const uint8_t *m, size_t n, bool card)
 static void handle_desk(const uint8_t *m, size_t n)
 {
     if (n < YD_CCID_HDR || yd_ccid_dwlen(m) != n - YD_CCID_HDR) {
-        ESP_LOGW(TAG, "机上ユニットから形式不正の応答 (len=%u)", (unsigned)n);
+        ESP_LOGW(TAG, YD_L("Malformed response from the desk unit (len=%u)", "机上ユニットから形式不正の応答 (len=%u)"), (unsigned)n);
         return;
     }
     if (!s_pend.active || m[6] != s_pend.seq) {
-        ESP_LOGW(TAG, "待っていない応答を破棄 (type=0x%02x seq=%u)", m[0], m[6]);
+        ESP_LOGW(TAG, YD_L("Dropping unexpected response (type=0x%02x seq=%u)", "待っていない応答を破棄 (type=0x%02x seq=%u)"), m[0], m[6]);
         return;
     }
     bool te = (m[7] & 0xC0) == CCID_CMD_TIME_EXT;
     s_pend.t_desk = now_ms();
     if (!send_to_mac(m, n)) {
-        ESP_LOGW(TAG, "Macへの応答送信に失敗");
+        ESP_LOGW(TAG, YD_L("Failed to send the response to the host", "Macへの応答送信に失敗"));
     }
     s_pend.t_mac = now_ms();
     if (te) {
         return;   /* YubiKey 自身の時間延長（タッチ待ちなど）。本当の応答を待ち続ける */
     }
-    ESP_LOGI(TAG, "→Mac 0x%02x seq=%u len=%u status=0x%02x err=0x%02x（%lldms）", m[0], m[6],
+    ESP_LOGI(TAG, YD_L("→host 0x%02x seq=%u len=%u status=0x%02x err=0x%02x (%lldms)", "→Mac 0x%02x seq=%u len=%u status=0x%02x err=0x%02x（%lldms）"), m[0], m[6],
              (unsigned)(n - YD_CCID_HDR), m[7], m[8], s_pend.t_mac - s_pend.t_start);
     s_pend.active = false;
 }
@@ -418,9 +419,9 @@ static void ccid_task(void *arg)
         if (card != card_seen) {
             card_seen = card;
             notify_pending = true;
-            ESP_LOGI(TAG, "スマートカード: %s", card ? "あり（YubiKeyのCCIDが使えます）" : "なし");
+            ESP_LOGI(TAG, YD_L("Smart card: %s", "スマートカード: %s"), card ? YD_L("present (the key's CCID is available)", "あり（YubiKeyのCCIDが使えます）") : YD_L("absent", "なし"));
             if (!card) {
-                fail_pending("YubiKey/リンクが切れた");
+                fail_pending(YD_L("key or link lost", "YubiKey/リンクが切れた"));
                 xMessageBufferReset(s_desk_mb);
             }
         }
@@ -449,11 +450,11 @@ static void ccid_task(void *arg)
         if (s_pend.active) {
             int64_t t = now_ms();
             if (t - s_pend.t_desk > PENDING_TIMEOUT_MS) {
-                fail_pending("机上ユニットから応答なし");
+                fail_pending(YD_L("no response from the desk unit", "机上ユニットから応答なし"));
             } else if (t - s_pend.t_mac > LOCAL_TE_MS && yd_ccid_resp_type(s_pend.type) == CCID_RDR_DATA_BLOCK) {
                 reply_local(s_pend.hdr, CCID_CMD_TIME_EXT | CCID_ICC_ACTIVE, 0x01);
                 s_pend.t_mac = now_ms();
-                ESP_LOGI(TAG, "応答待ち %lldms: Macに時間延長を送信", t - s_pend.t_start);
+                ESP_LOGI(TAG, YD_L("Waiting %lldms: sending a time extension to the host", "応答待ち %lldms: Macに時間延長を送信"), t - s_pend.t_start);
             }
         }
     }
@@ -477,12 +478,12 @@ void ccid_dev_from_link(const uint8_t *data, uint16_t len)
 {
     int n = yd_frag_rx_feed(&s_link_rx, data, len);
     if (n < 0) {
-        ESP_LOGW(TAG, "机上ユニットからの応答が欠けていたので破棄");
+        ESP_LOGW(TAG, YD_L("Response from the desk unit was incomplete: dropped", "机上ユニットからの応答が欠けていたので破棄"));
         return;
     }
     if (n > 0) {
         if (xMessageBufferSend(s_desk_mb, s_link_asm, n, pdMS_TO_TICKS(200)) != (size_t)n) {
-            ESP_LOGW(TAG, "応答キューが一杯のため破棄");
+            ESP_LOGW(TAG, YD_L("Response queue full: dropped", "応答キューが一杯のため破棄"));
         }
         kick();
     }

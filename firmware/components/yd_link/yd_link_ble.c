@@ -46,6 +46,7 @@
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "yd_lang.h"
 
 static const char *TAG = "yd_ble";
 
@@ -156,7 +157,7 @@ static void cp_request(bool idle)
     uint16_t conn = s_conn;
     int rc = (conn == BLE_HS_CONN_HANDLE_NONE) ? BLE_HS_ENOTCONN : ble_gap_update_params(conn, &p);
     if (rc == 0) {
-        ESP_LOGI(TAG, "接続パラメータ変更を要求: %s", idle ? "省電力（30ms / latency 12 / 6s）" : "低遅延（15-30ms / latency 0 / 4s）");
+        ESP_LOGI(TAG, YD_L("Requesting connection parameters: %s", "接続パラメータ変更を要求: %s"), idle ? YD_L("power save (30ms / latency 12 / 6s)", "省電力（30ms / latency 12 / 6s）") : YD_L("low latency (15-30ms / latency 0 / 4s)", "低遅延（15-30ms / latency 0 / 4s）"));
         return;
     }
     portENTER_CRITICAL(&s_cp_mux);
@@ -164,7 +165,7 @@ static void cp_request(bool idle)
     /* 低遅延への切り替えはすぐ再試行、省電力側は少し待つ */
     s_cp_retry_at_us = esp_timer_get_time() + (idle ? (int64_t)CP_RETRY_MS * 1000 : 200 * 1000);
     portEXIT_CRITICAL(&s_cp_mux);
-    ESP_LOGW(TAG, "接続パラメータ変更の要求に失敗 rc=%d（後で再試行）", rc);
+    ESP_LOGW(TAG, YD_L("Connection parameter request failed rc=%d (will retry)", "接続パラメータ変更の要求に失敗 rc=%d（後で再試行）"), rc);
 }
 
 /* 目標と現状が違えば更新を要求する（どのタスクから呼んでもよい） */
@@ -224,7 +225,7 @@ static void log_conn_params(const char *label, uint16_t conn)
         return;
     }
     unsigned itvl_x100 = (unsigned)d.conn_itvl * 125;   /* 1.25ms単位 → 0.01ms単位 */
-    ESP_LOGI(TAG, "%s interval=%u.%02ums latency=%u timeout=%ums（実質の起床間隔 約%ums）",
+    ESP_LOGI(TAG, YD_L("%s interval=%u.%02ums latency=%u timeout=%ums (effective wake-up interval ~%ums)", "%s interval=%u.%02ums latency=%u timeout=%ums（実質の起床間隔 約%ums）"),
              label, itvl_x100 / 100, itvl_x100 % 100, d.conn_latency, (unsigned)d.supervision_timeout * 10,
              (unsigned)(itvl_x100 * (1u + d.conn_latency)) / 100);
 }
@@ -249,7 +250,7 @@ static void set_up(bool up)
         return;
     }
     s_up = up;
-    ESP_LOGI(TAG, "%s", up ? "▶ BLEリンク確立（暗号化＋鍵による相互認証済み）" : "■ BLEリンク切断");
+    ESP_LOGI(TAG, "%s", up ? YD_L("▶ BLE link up (encrypted, mutually authenticated with the key)", "▶ BLEリンク確立（暗号化＋鍵による相互認証済み）") : YD_L("■ BLE link down", "■ BLEリンク切断"));
     if (up && s_cp_enabled) {
         /* 確立直後はレシーバーが指定した低遅延パラメータ。CP_IDLE_AFTER_MS 後に省電力へ */
         struct ble_gap_conn_desc d;
@@ -336,7 +337,7 @@ static void post_event(pk_kind_t kind)
     pkt_t p = { .kind = kind, .len = 0 };
     if (xQueueSend(s_rxq, &p, pdMS_TO_TICKS(100)) != pdTRUE) {
         s_ev_drops++;
-        ESP_LOGE(TAG, "接続状態の通知をキューに入れられませんでした（%" PRIu32 "回目）→ 切断します", s_ev_drops);
+        ESP_LOGE(TAG, YD_L("Could not queue a link state event (#%", "接続状態の通知をキューに入れられませんでした（%") PRIu32 YD_L(") → disconnecting", "回目）→ 切断します"), s_ev_drops);
         uint16_t c = s_conn;
         if (c != BLE_HS_CONN_HANDLE_NONE) {
             ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM);
@@ -363,7 +364,7 @@ static void transport_ready(bool ready)
 
 static void hs_disconnect(const char *why)
 {
-    ESP_LOGE(TAG, "%s → 切断します", why);
+    ESP_LOGE(TAG, YD_L("%s → disconnecting", "%s → 切断します"), why);
     if (!s_up) {
         /* 鍵の相互認証が済む前の切断（不一致・時間切れ・形のおかしい HELLO/AUTH など）は理由を問わず、
          * 相手の BLE ボンドも消す。正しい相手ならつなぎ直したときに自動でペアリングし直す */
@@ -378,7 +379,7 @@ static void hs_disconnect(const char *why)
 static void hs_timeout_cb(void *arg)
 {
     if (s_ready && !s_up) {
-        hs_disconnect("鍵による相互認証が時間内に終わりませんでした（相手のファームが古いか、鍵がない可能性）");
+        hs_disconnect(YD_L("Key-based mutual authentication timed out (peer firmware may be old, or it has no key)", "鍵による相互認証が時間内に終わりませんでした（相手のファームが古いか、鍵がない可能性）"));
     }
 }
 
@@ -417,7 +418,7 @@ static void hs_progress(void)
         s_tx_ctr = s_rx_ctr = 0;
         xSemaphoreGive(s_sec_mutex);
         if (rc != 0) {
-            hs_disconnect("鍵の導出に失敗");
+            hs_disconnect(YD_L("Key derivation failed", "鍵の導出に失敗"));
             return;
         }
         s_hs_keys = true;
@@ -435,14 +436,14 @@ static void hs_progress(void)
         yd_sec_wipe(expect, sizeof(expect));
         if (!ok) {
             s_sec_fail++;
-            hs_disconnect("相手の鍵が一致しません。2台に同じ鍵ファイルを書き込んでください");
+            hs_disconnect(YD_L("Peer key does not match. Flash the same key file to both units", "相手の鍵が一致しません。2台に同じ鍵ファイルを書き込んでください"));
             return;
         }
         esp_timer_stop(s_hs_timer);
         s_conn_authed = true;
         if (s_is_central && !s_have_target && s_peer_addr_valid) {
             target_save(&s_peer_addr);   /* 鍵の相互認証が通った相手だけを登録する */
-            print_addr("この机上ユニットを登録しました:", &s_peer_addr);
+            print_addr(YD_L("Registered this desk unit:", "この机上ユニットを登録しました:"), &s_peer_addr);
         }
         set_up(true);
     }
@@ -463,7 +464,7 @@ static void send_hello(void)
 static void hs_begin(void)
 {
     if (!s_have_psk) {
-        hs_disconnect("鍵（keyrelay-key.bin）が書き込まれていません");
+        hs_disconnect(YD_L("No key (keyrelay-key.bin) has been flashed", "鍵（keyrelay-key.bin）が書き込まれていません"));
         return;
     }
     if (s_is_central && !s_hs_hello_sent) {
@@ -484,7 +485,7 @@ static void on_packet(const pkt_t *p)
     switch (p->buf[0]) {
     case YD_SEC_T_HELLO:
         if (p->len != 3 + YD_SEC_NONCE_LEN || p->buf[1] != YD_SEC_VERSION || p->buf[2] != peer_role() || s_hs_peer_hello) {
-            hs_disconnect("不正なHELLO");
+            hs_disconnect(YD_L("Malformed HELLO", "不正なHELLO"));
             return;
         }
         memcpy(s_peer_nonce, &p->buf[3], YD_SEC_NONCE_LEN);
@@ -496,7 +497,7 @@ static void on_packet(const pkt_t *p)
         return;
     case YD_SEC_T_AUTH:
         if (p->len != 1 + YD_SEC_MAC_LEN || s_hs_peer_auth) {
-            hs_disconnect("不正なAUTH");
+            hs_disconnect(YD_L("Malformed AUTH", "不正なAUTH"));
             return;
         }
         memcpy(s_peer_mac, &p->buf[1], YD_SEC_MAC_LEN);
@@ -517,12 +518,12 @@ static void on_packet(const pkt_t *p)
         xSemaphoreGive(s_sec_mutex);
         if (n < 1) {
             s_sec_fail++;
-            hs_disconnect("改ざんされたか壊れたデータを受信");
+            hs_disconnect(YD_L("Received tampered or corrupted data", "改ざんされたか壊れたデータを受信"));
             return;
         }
         if (!fresh) {
             s_sec_fail++;
-            hs_disconnect("古い通し番号のデータを受信（リプレイの疑い）");
+            hs_disconnect(YD_L("Received data with an old sequence number (possible replay)", "古い通し番号のデータを受信（リプレイの疑い）"));
             return;
         }
         g_ydl_stats.rx_frames++;
@@ -532,7 +533,7 @@ static void on_packet(const pkt_t *p)
         return;
     }
     default:
-        hs_disconnect("暗号化されていないデータを受信（相手のファームが古い可能性）");
+        hs_disconnect(YD_L("Received unencrypted data (peer firmware may be old)", "暗号化されていないデータを受信（相手のファームが古い可能性）"));
         return;
     }
 }
@@ -541,7 +542,7 @@ static bool load_psk(void)
 {
     const esp_partition_t *part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, KEY_PARTITION);
     if (!part) {
-        ESP_LOGE(TAG, "パーティション \"%s\" がありません（パーティションテーブルが古い）", KEY_PARTITION);
+        ESP_LOGE(TAG, YD_L("Partition \"%s\" not found (outdated partition table)", "パーティション \"%s\" がありません（パーティションテーブルが古い）"), KEY_PARTITION);
         return false;
     }
     uint8_t buf[YD_SEC_KEYFILE_LEN];
@@ -551,9 +552,9 @@ static bool load_psk(void)
     bool ok = yd_sec_parse_keyfile(buf, sizeof(buf), s_psk);
     yd_sec_wipe(buf, sizeof(buf));
     if (ok) {
-        ESP_LOGI(TAG, "鍵を読み込みました（0x%06" PRIx32 "）", part->address);
+        ESP_LOGI(TAG, YD_L("Key loaded (0x%06", "鍵を読み込みました（0x%06") PRIx32 YD_L(")", "）"), part->address);
     } else {
-        ESP_LOGE(TAG, "鍵がありません。鍵ファイル（keyrelay-key.bin）を 0x%06" PRIx32 " に書き込んでください（docs/BUILD.md 参照）", part->address);
+        ESP_LOGE(TAG, YD_L("No key. Flash the key file (keyrelay-key.bin) at 0x%06", "鍵がありません。鍵ファイル（keyrelay-key.bin）を 0x%06") PRIx32 YD_L(" (see docs/BUILD.md)", " に書き込んでください（docs/BUILD.md 参照）"), part->address);
     }
     return ok;
 }
@@ -628,7 +629,7 @@ static void tx_task(void *arg)
             xSemaphoreGive(s_sec_mutex);
             if (n < 0) {
                 g_ydl_stats.tx_dropped++;
-                hs_disconnect("暗号化に失敗");
+                hs_disconnect(YD_L("Encryption failed", "暗号化に失敗"));
                 continue;
             }
             buf = out;
@@ -648,7 +649,7 @@ static void tx_task(void *arg)
             }
         } else {
             g_ydl_stats.tx_dropped++;
-            ESP_LOGW(TAG, "送信失敗 rc=%d", rc);
+            ESP_LOGW(TAG, YD_L("Send failed rc=%d", "送信失敗 rc=%d"), rc);
         }
     }
 }
@@ -662,13 +663,13 @@ esp_err_t ydl_ble_send(uint8_t ch, const uint8_t *data, uint16_t len)
         return ESP_ERR_INVALID_STATE;
     }
     if (len > BLE_PKT_MAX - 1 - YD_SEC_OVERHEAD) {   /* 16bit の足し算があふれる前に弾く */
-        ESP_LOGE(TAG, "ペイロードが大きすぎます len=%u", len);
+        ESP_LOGE(TAG, YD_L("Payload too large len=%u", "ペイロードが大きすぎます len=%u"), len);
         return ESP_ERR_INVALID_SIZE;
     }
     uint16_t mtu = ble_att_mtu(s_conn);
     size_t wire = (size_t)len + 1 + YD_SEC_OVERHEAD;
     if (mtu && wire > (size_t)mtu - 3) {
-        ESP_LOGE(TAG, "ペイロードが大きすぎます len=%u mtu=%u", len, mtu);
+        ESP_LOGE(TAG, YD_L("Payload too large len=%u mtu=%u", "ペイロードが大きすぎます len=%u mtu=%u"), len, mtu);
         return ESP_ERR_INVALID_SIZE;
     }
     pkt_t p = { .kind = PK_DATA, .len = len + 1 };
@@ -706,7 +707,7 @@ esp_err_t ydl_ble_forget_peers(void)
         nvs_close(h);
     }
     s_have_target = false;
-    ESP_LOGW(TAG, "ペアリング情報を消去しました");
+    ESP_LOGW(TAG, YD_L("Pairing data erased", "ペアリング情報を消去しました"));
     if (s_conn != BLE_HS_CONN_HANDLE_NONE) {
         ble_gap_terminate(s_conn, BLE_ERR_REM_USER_CONN_TERM);
     }
@@ -781,7 +782,7 @@ static void periph_advertise(void)
     if (rc && rc != BLE_HS_EALREADY) {
         ESP_LOGE(TAG, "adv start rc=%d", rc);
     } else {
-        ESP_LOGI(TAG, "アドバタイズ中…（新規ペアリング受付: %s）", pairing_window_open() ? "可" : "不可");
+        ESP_LOGI(TAG, YD_L("Advertising... (accepting new pairing: %s)", "アドバタイズ中…（新規ペアリング受付: %s）"), pairing_window_open() ? YD_L("yes", "可") : YD_L("no", "不可"));
     }
 }
 
@@ -805,8 +806,8 @@ static void forget_failed_peer(void)
     };
     if (yd_bond_forget_on_disconnect(&c)) {
         ble_store_util_delete_peer(&s_peer_addr);
-        print_addr(c.hs_failed ? "鍵の相互認証に失敗した相手のペアリング情報を消しました:"
-                               : "ペアリングだけして認証前に切れた相手のペアリング情報を消しました:",
+        print_addr(c.hs_failed ? YD_L("Deleted the bond of a peer that failed key authentication:", "鍵の相互認証に失敗した相手のペアリング情報を消しました:")
+                               : YD_L("Deleted the bond of a peer that paired but disconnected before authenticating:", "ペアリングだけして認証前に切れた相手のペアリング情報を消しました:"),
                    &s_peer_addr);
     }
     s_forget_on_disconnect = false;
@@ -822,8 +823,8 @@ static int store_status_cb(struct ble_store_status_event *event, void *arg)
 {
     switch (event->event_code) {
     case BLE_STORE_EVENT_OVERFLOW:
-        ESP_LOGW(TAG, "ペアリング情報の保存先がいっぱいです（obj_type=%d）。古い相手は消さず、今回の保存をあきらめます。"
-                      "相手を入れ替えるときは BOOT を3秒押してペアリング情報を消してください",
+        ESP_LOGW(TAG, YD_L("Bond storage is full (obj_type=%d). Existing peers are kept and this bond is not saved. ", "ペアリング情報の保存先がいっぱいです（obj_type=%d）。古い相手は消さず、今回の保存をあきらめます。")
+                      YD_L("To replace a peer, hold BOOT for 3 s to erase the pairing data", "相手を入れ替えるときは BOOT を3秒押してペアリング情報を消してください"),
                  event->overflow.obj_type);
         return BLE_HS_ESTORE_CAP;
     case BLE_STORE_EVENT_FULL:
@@ -847,18 +848,18 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
         s_encrypted = false;
         s_subscribed = false;
         cp_reset(false);
-        log_conn_params("接続パラメータ（初期）:", s_conn);
+        log_conn_params(YD_L("Connection parameters (initial):", "接続パラメータ（初期）:"), s_conn);
         if (ble_gap_conn_find(s_conn, &desc) == 0) {
-            print_addr("接続:", &desc.peer_id_addr);
+            print_addr(YD_L("Connected:", "接続:"), &desc.peer_id_addr);
             if (!pairing_window_open() && !peer_is_bonded(&desc.peer_id_addr)) {
-                ESP_LOGW(TAG, "未登録の相手です。ペアリング受付時間外のため切断します");
+                ESP_LOGW(TAG, YD_L("Unknown peer outside the pairing window: disconnecting", "未登録の相手です。ペアリング受付時間外のため切断します"));
                 ble_gap_terminate(s_conn, BLE_ERR_REM_USER_CONN_TERM);
             }
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "切断 reason=0x%x", event->disconnect.reason);
+        ESP_LOGI(TAG, YD_L("Disconnected reason=0x%x", "切断 reason=0x%x"), event->disconnect.reason);
         forget_failed_peer();
         s_conn = BLE_HS_CONN_HANDLE_NONE;
         s_encrypted = false;
@@ -871,7 +872,7 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_ENC_CHANGE:
         if (event->enc_change.status == 0 && ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
             s_encrypted = desc.sec_state.encrypted;
-            ESP_LOGI(TAG, "暗号化 %s（bonded=%d）", s_encrypted ? "OK" : "NG", desc.sec_state.bonded);
+            ESP_LOGI(TAG, YD_L("Encryption %s (bonded=%d)", "暗号化 %s（bonded=%d）"), s_encrypted ? "OK" : "NG", desc.sec_state.bonded);
             s_peer_addr = desc.peer_id_addr;
             s_peer_addr_valid = true;
             /* ボンディング済みの相手は購読状態が復元済みのことがある */
@@ -879,7 +880,7 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
                 transport_ready(true);
             }
         } else {
-            ESP_LOGW(TAG, "暗号化失敗 status=%d", event->enc_change.status);
+            ESP_LOGW(TAG, YD_L("Encryption failed status=%d", "暗号化失敗 status=%d"), event->enc_change.status);
         }
         return 0;
 
@@ -912,10 +913,10 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
         }
         portEXIT_CRITICAL(&s_cp_mux);
         if (ok) {
-            log_conn_params(idle_now ? "接続パラメータ更新完了（省電力）:" : "接続パラメータ更新完了（低遅延）:",
+            log_conn_params(idle_now ? YD_L("Connection parameters updated (power save):", "接続パラメータ更新完了（省電力）:") : YD_L("Connection parameters updated (low latency):", "接続パラメータ更新完了（低遅延）:"),
                             event->conn_update.conn_handle);
         } else {
-            ESP_LOGW(TAG, "接続パラメータ更新に失敗 status=%d（%d秒後に再試行）", event->conn_update.status, CP_RETRY_MS / 1000);
+            ESP_LOGW(TAG, YD_L("Connection parameter update failed status=%d (retry in %d s)", "接続パラメータ更新に失敗 status=%d（%d秒後に再試行）"), event->conn_update.status, CP_RETRY_MS / 1000);
         }
         /* 手続き中に通信が始まっていたら、すぐ低遅延へ戻す */
         cp_eval();
@@ -924,14 +925,14 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_CONN_UPDATE_REQ:
         /* レシーバー側から変更要求が来た場合はそのまま受け入れる */
-        ESP_LOGI(TAG, "相手から接続パラメータ変更要求: interval %u-%u latency %u timeout %u",
+        ESP_LOGI(TAG, YD_L("Peer requested connection parameters: interval %u-%u latency %u timeout %u", "相手から接続パラメータ変更要求: interval %u-%u latency %u timeout %u"),
                  event->conn_update_req.peer_params->itvl_min, event->conn_update_req.peer_params->itvl_max,
                  event->conn_update_req.peer_params->latency, event->conn_update_req.peer_params->supervision_timeout);
         return 0;
 
     case BLE_GAP_EVENT_REPEAT_PAIRING:
         if (!pairing_window_open()) {
-            ESP_LOGW(TAG, "再ペアリング要求を拒否（受付時間外）");
+            ESP_LOGW(TAG, YD_L("Re-pairing request rejected (outside the pairing window)", "再ペアリング要求を拒否（受付時間外）"));
             return BLE_GAP_REPEAT_PAIRING_IGNORE;
         }
         if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
@@ -961,7 +962,7 @@ static void central_scan(void)
     if (rc && rc != BLE_HS_EALREADY) {
         ESP_LOGE(TAG, "scan start rc=%d", rc);
     } else {
-        ESP_LOGI(TAG, "机上ユニットを探しています…%s", s_have_target ? "（登録済みの相手のみ）" : "（初回ペアリング）");
+        ESP_LOGI(TAG, YD_L("Scanning for the desk unit...%s", "机上ユニットを探しています…%s"), s_have_target ? YD_L(" (registered unit only)", "（登録済みの相手のみ）") : YD_L(" (first pairing)", "（初回ペアリング）"));
     }
 }
 
@@ -991,7 +992,7 @@ static void central_connect(const ble_addr_t *addr)
         .supervision_timeout = BLE_GAP_SUPERVISION_TIMEOUT_MS(4000),
         .min_ce_len = 0, .max_ce_len = 0,
     };
-    print_addr("接続を試みます:", addr);
+    print_addr(YD_L("Connecting to:", "接続を試みます:"), addr);
     int rc = ble_gap_connect(s_own_addr_type, addr, 10000, &cp, gap_event_central, NULL);
     if (rc) {
         ESP_LOGW(TAG, "connect rc=%d", rc);
@@ -1004,7 +1005,7 @@ static int on_cccd_written(uint16_t conn, const struct ble_gatt_error *err, stru
     if (err->status == 0) {
         transport_ready(true);
     } else {
-        ESP_LOGE(TAG, "通知の購読に失敗 status=%d", err->status);
+        ESP_LOGE(TAG, YD_L("Notification subscription failed status=%d", "通知の購読に失敗 status=%d"), err->status);
         ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
     }
     return 0;
@@ -1022,7 +1023,7 @@ static int on_chr(uint16_t conn, const struct ble_gatt_error *err, const struct 
     }
     if (err->status == BLE_HS_EDONE) {
         if (!s_peer_to_desk || !s_peer_to_recv) {
-            ESP_LOGE(TAG, "キャラクタリスティックが見つかりません");
+            ESP_LOGE(TAG, YD_L("Characteristic not found", "キャラクタリスティックが見つかりません"));
             ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
             return 0;
         }
@@ -1031,7 +1032,7 @@ static int on_chr(uint16_t conn, const struct ble_gatt_error *err, const struct 
         ble_gattc_write_flat(conn, s_peer_to_recv + 1, on, sizeof(on), on_cccd_written, NULL);
         return 0;
     }
-    ESP_LOGE(TAG, "キャラクタリスティック探索エラー %d", err->status);
+    ESP_LOGE(TAG, YD_L("Characteristic discovery error %d", "キャラクタリスティック探索エラー %d"), err->status);
     ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
     return 0;
 }
@@ -1047,7 +1048,7 @@ static int on_svc(uint16_t conn, const struct ble_gatt_error *err, const struct 
         ble_gattc_disc_all_chrs(conn, s_svc_start, s_svc_end, on_chr, NULL);
         return 0;
     }
-    ESP_LOGE(TAG, "サービスが見つかりません %d", err->status);
+    ESP_LOGE(TAG, YD_L("Service not found %d", "サービスが見つかりません %d"), err->status);
     ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
     return 0;
 }
@@ -1078,7 +1079,7 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status != 0) {
-            ESP_LOGW(TAG, "接続失敗 status=%d", event->connect.status);
+            ESP_LOGW(TAG, YD_L("Connection failed status=%d", "接続失敗 status=%d"), event->connect.status);
             central_scan();
             return 0;
         }
@@ -1092,7 +1093,7 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "切断 reason=0x%x", event->disconnect.reason);
+        ESP_LOGI(TAG, YD_L("Disconnected reason=0x%x", "切断 reason=0x%x"), event->disconnect.reason);
         forget_failed_peer();
         s_conn = BLE_HS_CONN_HANDLE_NONE;
         s_encrypted = false;
@@ -1103,15 +1104,15 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_ENC_CHANGE:
         if (event->enc_change.status == 0 && ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
             s_encrypted = desc.sec_state.encrypted;
-            ESP_LOGI(TAG, "暗号化 %s（bonded=%d）", s_encrypted ? "OK" : "NG", desc.sec_state.bonded);
+            ESP_LOGI(TAG, YD_L("Encryption %s (bonded=%d)", "暗号化 %s（bonded=%d）"), s_encrypted ? "OK" : "NG", desc.sec_state.bonded);
             s_peer_addr = desc.peer_id_addr;
             s_peer_addr_valid = true;
             if (!s_have_target) {
-                print_addr("初回の相手（鍵の相互認証が通ったら登録します）:", &desc.peer_id_addr);
+                print_addr(YD_L("First peer (registered once key authentication succeeds):", "初回の相手（鍵の相互認証が通ったら登録します）:"), &desc.peer_id_addr);
             }
             ble_gattc_disc_svc_by_uuid(s_conn, &UUID_SVC.u, on_svc, NULL);
         } else {
-            ESP_LOGW(TAG, "暗号化失敗 status=%d（相手が鍵を失った可能性）", event->enc_change.status);
+            ESP_LOGW(TAG, YD_L("Encryption failed status=%d (the peer may have lost its bond)", "暗号化失敗 status=%d（相手が鍵を失った可能性）"), event->enc_change.status);
             if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
                 ble_store_util_delete_peer(&desc.peer_id_addr);
             }
@@ -1136,22 +1137,22 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
     /* 机上ユニット（Peripheral）からの接続パラメータ変更要求は、そのまま受け入れる。
      * 0 を返すと NimBLE は相手の希望値で承認する（こちらから別の値を押し付けない） */
     case BLE_GAP_EVENT_CONN_UPDATE_REQ:
-        ESP_LOGI(TAG, "机上ユニットから接続パラメータ変更要求: interval %u-%u(×1.25ms) latency %u timeout %u(×10ms) → 承認",
+        ESP_LOGI(TAG, YD_L("Desk unit requested connection parameters: interval %u-%u(x1.25ms) latency %u timeout %u(x10ms) → accepted", "机上ユニットから接続パラメータ変更要求: interval %u-%u(×1.25ms) latency %u timeout %u(×10ms) → 承認"),
                  event->conn_update_req.peer_params->itvl_min, event->conn_update_req.peer_params->itvl_max,
                  event->conn_update_req.peer_params->latency, event->conn_update_req.peer_params->supervision_timeout);
         return 0;
 
     case BLE_GAP_EVENT_L2CAP_UPDATE_REQ:
-        ESP_LOGI(TAG, "机上ユニットから接続パラメータ変更要求(L2CAP): interval %u-%u latency %u → 承認",
+        ESP_LOGI(TAG, YD_L("Desk unit requested connection parameters (L2CAP): interval %u-%u latency %u → accepted", "机上ユニットから接続パラメータ変更要求(L2CAP): interval %u-%u latency %u → 承認"),
                  event->conn_update_req.peer_params->itvl_min, event->conn_update_req.peer_params->itvl_max,
                  event->conn_update_req.peer_params->latency);
         return 0;
 
     case BLE_GAP_EVENT_CONN_UPDATE:
         if (event->conn_update.status == 0) {
-            log_conn_params("接続パラメータ更新:", event->conn_update.conn_handle);
+            log_conn_params(YD_L("Connection parameters updated:", "接続パラメータ更新:"), event->conn_update.conn_handle);
         } else {
-            ESP_LOGW(TAG, "接続パラメータ更新に失敗 status=%d", event->conn_update.status);
+            ESP_LOGW(TAG, YD_L("Connection parameter update failed status=%d", "接続パラメータ更新に失敗 status=%d"), event->conn_update.status);
         }
         return 0;
 
@@ -1179,7 +1180,7 @@ static void on_sync(void)
     ble_hs_id_infer_auto(0, &s_own_addr_type);
     uint8_t a[6] = { 0 };
     ble_hs_id_copy_addr(s_own_addr_type, a, NULL);
-    ESP_LOGI(TAG, "自分のBLEアドレス %02x:%02x:%02x:%02x:%02x:%02x（登録済みペア数=%d）",
+    ESP_LOGI(TAG, YD_L("Own BLE address %02x:%02x:%02x:%02x:%02x:%02x (bonded peers=%d)", "自分のBLEアドレス %02x:%02x:%02x:%02x:%02x:%02x（登録済みペア数=%d）"),
              a[5], a[4], a[3], a[2], a[1], a[0], bond_count());
     if (s_is_central) {
         central_scan();
@@ -1225,7 +1226,7 @@ esp_err_t ydl_ble_init(const yd_link_config_t *cfg)
 
     if (!s_have_psk) {
         /* 鍵がなければ電波も出さない（鍵なしで動く状態を作らない） */
-        ESP_LOGE(TAG, "鍵がないためBLEを起動しません");
+        ESP_LOGE(TAG, YD_L("No key: BLE is not started", "鍵がないためBLEを起動しません"));
         return ESP_OK;
     }
 
@@ -1255,6 +1256,6 @@ esp_err_t ydl_ble_init(const yd_link_config_t *cfg)
 
     ble_store_config_init();
     nimble_port_freertos_init(host_task);
-    ESP_LOGI(TAG, "BLE起動（%s）", s_is_central ? "レシーバー / Central" : "机上ユニット / Peripheral");
+    ESP_LOGI(TAG, YD_L("BLE started (%s)", "BLE起動（%s）"), s_is_central ? YD_L("receiver / central", "レシーバー / Central") : YD_L("desk unit / peripheral", "机上ユニット / Peripheral"));
     return ESP_OK;
 }

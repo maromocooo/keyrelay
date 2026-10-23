@@ -59,6 +59,7 @@
 #include "yd_link.h"
 #include "ccid_host.h"
 #include "otp_host.h"
+#include "yd_lang.h"
 
 static const char *TAG = "desk";
 
@@ -254,9 +255,9 @@ static const char *bus_state_name(bus_state_t st)
 {
     switch (st) {
     case BUS_ACTIVE:     return "ON";
-    case BUS_SUSPENDING: return "停止処理中";
-    case BUS_SUSPENDED:  return "停止(サスペンド)";
-    case BUS_RESUMING:   return "再開中";
+    case BUS_SUSPENDING: return YD_L("suspending", "停止処理中");
+    case BUS_SUSPENDED:  return YD_L("suspended", "停止(サスペンド)");
+    case BUS_RESUMING:   return YD_L("resuming", "再開中");
     }
     return "?";
 }
@@ -364,7 +365,7 @@ static void send_to_mac(const uint8_t *rep)
 {
     esp_err_t err = yd_link_send(YD_CH_FIDO, rep, FIDO_REPORT_LEN);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "レシーバーへの送信失敗: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, YD_L("Send to the receiver failed: %s", "レシーバーへの送信失敗: %s"), esp_err_to_name(err));
     }
 }
 
@@ -397,7 +398,7 @@ static void send_init_resp(uint32_t reply_cid, const uint8_t nonce[8], uint32_t 
     r[23] = valid ? s_devinfo.caps : 0x05;   /* 不明時: WINK + CBOR */
     portEXIT_CRITICAL(&s_lock);
     if (!valid) {
-        ESP_LOGW(TAG, "YubiKeyの情報が未取得のため、既定値(CTAPHID v2, caps=0x05)でINITに応答します");
+        ESP_LOGW(TAG, YD_L("Key information not available yet: answering INIT with defaults (CTAPHID v2, caps=0x05)", "YubiKeyの情報が未取得のため、既定値(CTAPHID v2, caps=0x05)でINITに応答します"));
     }
     send_to_mac(r);
 }
@@ -467,13 +468,13 @@ static void handle_broadcast_resp(const uint8_t *r)
         return;
     }
     if (s_alloc.waiting && r[4] == CTAPHID_ERROR) {
-        ESP_LOGW(TAG, "YubiKeyがINITにエラー応答 code=0x%02x", r[7]);
+        ESP_LOGW(TAG, YD_L("Key answered INIT with an error code=0x%02x", "YubiKeyがINITにエラー応答 code=0x%02x"), r[7]);
         s_alloc.ok = false;
         s_alloc.waiting = false;
         xSemaphoreGive(s_alloc.done);
         return;
     }
-    ESP_LOGW(TAG, "ブロードキャストCIDの想定外の応答を破棄 CMD=0x%02x", r[4]);
+    ESP_LOGW(TAG, YD_L("Dropping unexpected broadcast CID response CMD=0x%02x", "ブロードキャストCIDの想定外の応答を破棄 CMD=0x%02x"), r[4]);
 }
 
 static void relay_key_to_mac(const uint8_t *in)
@@ -532,23 +533,23 @@ static void relay_key_to_mac(const uint8_t *in)
 
     if (!found) {
         if (init) {
-            ESP_LOGW(TAG, "対応する仮想CIDがない応答を破棄 devCID=%08" PRIx32 " CMD=0x%02x", dcid, cmd);
+            ESP_LOGW(TAG, YD_L("Dropping response with no matching virtual CID devCID=%08", "対応する仮想CIDがない応答を破棄 devCID=%08") PRIx32 " CMD=0x%02x", dcid, cmd);
         }
         return;
     }
     if (init && cmd != CTAPHID_KEEPALIVE) {
         ESP_LOGI(TAG, "Key→Mac devCID=%08" PRIx32 "→vCID=%08" PRIx32 " CMD=0x%02x len=%u%s",
-                 dcid, vcid, cmd, bcnt, final ? "（完了）" : "");
+                 dcid, vcid, cmd, bcnt, final ? YD_L(" (done)", "（完了）") : "");
     } else if (log_ka) {
-        ESP_LOGI(TAG, "Key→Mac vCID=%08" PRIx32 " KEEPALIVE status=%u（タッチ待ちなど。バスは止めません）", vcid, r[7]);
+        ESP_LOGI(TAG, "Key→Mac vCID=%08" PRIx32 YD_L(" KEEPALIVE status=%u (waiting for touch etc.; the bus stays up)", " KEEPALIVE status=%u（タッチ待ちなど。バスは止めません）"), vcid, r[7]);
     } else if (final) {
-        ESP_LOGI(TAG, "Key→Mac vCID=%08" PRIx32 " 応答の送信完了", vcid);
+        ESP_LOGI(TAG, "Key→Mac vCID=%08" PRIx32 YD_L(" response sent", " 応答の送信完了"), vcid);
     }
     if (invalidated) {
-        ESP_LOGW(TAG, "YubiKeyがCIDを無効と応答。vCID=%08" PRIx32 " のデバイスCIDを次回取り直します", vcid);
+        ESP_LOGW(TAG, YD_L("Key reported an invalid CID. Device CID for vCID=%08", "YubiKeyがCIDを無効と応答。vCID=%08") PRIx32 YD_L(" will be re-acquired next time", " のデバイスCIDを次回取り直します"), vcid);
     }
     if (cid_changed) {
-        ESP_LOGI(TAG, "再同期でYubiKeyのCIDが変わりました vCID=%08" PRIx32, vcid);
+        ESP_LOGI(TAG, YD_L("Key CID changed after resync vCID=%08", "再同期でYubiKeyのCIDが変わりました vCID=%08") PRIx32, vcid);
     }
     put_cid(r, vcid);
     send_to_mac(r);
@@ -670,18 +671,18 @@ static void forward_locked(uint8_t *pkt, uint32_t vcid, bool init, uint8_t cmd)
     uint32_t epoch = s_epoch;
     portEXIT_CRITICAL(&s_lock);
     if (readopted) {
-        ESP_LOGW(TAG, "vCID=%08" PRIx32 " をテーブルに再登録（追い出し: %08" PRIx32 "）", vcid, evicted);
+        ESP_LOGW(TAG, "vCID=%08" PRIx32 YD_L(" re-registered in the table (evicted: %08", " をテーブルに再登録（追い出し: %08") PRIx32 YD_L(")", "）"), vcid, evicted);
     }
 
     if (!valid) {
         if (!init) {
-            ESP_LOGW(TAG, "継続パケットだがデバイスCIDが未割当のため破棄 vCID=%08" PRIx32, vcid);
+            ESP_LOGW(TAG, YD_L("Dropping continuation packet without a device CID vCID=%08", "継続パケットだがデバイスCIDが未割当のため破棄 vCID=%08") PRIx32, vcid);
             return;
         }
         int64_t t0 = now_us();
         esp_err_t err = dev_init_channel(&dcid);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "YubiKeyのCID取得に失敗 (%s)。Macにエラーを返します vCID=%08" PRIx32, esp_err_to_name(err), vcid);
+            ESP_LOGW(TAG, YD_L("Failed to get a CID from the key (%s). Returning an error to the host vCID=%08", "YubiKeyのCID取得に失敗 (%s)。Macにエラーを返します vCID=%08") PRIx32, esp_err_to_name(err), vcid);
             send_ctaphid_error(vcid, CTAPHID_ERR_OTHER);
             return;
         }
@@ -692,7 +693,7 @@ static void forward_locked(uint8_t *pkt, uint32_t vcid, bool init, uint8_t cmd)
             s_tab[i].depoch = s_epoch;
         }
         portEXIT_CRITICAL(&s_lock);
-        ESP_LOGI(TAG, "CID対応付け: vCID=%08" PRIx32 " ⇔ devCID=%08" PRIx32 "（epoch %" PRIu32 ", %lldms）",
+        ESP_LOGI(TAG, YD_L("CID mapping: vCID=%08", "CID対応付け: vCID=%08") PRIx32 " ⇔ devCID=%08" PRIx32 YD_L(" (epoch %", "（epoch %") PRIu32 YD_L(", %lldms)", ", %lldms）"),
                  vcid, dcid, epoch, (now_us() - t0) / 1000);
     }
 
@@ -712,7 +713,7 @@ static void forward_locked(uint8_t *pkt, uint32_t vcid, bool init, uint8_t cmd)
     }
     esp_err_t err = fido_write(pkt);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "YubiKeyへの書き込み失敗: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, YD_L("Write to the key failed: %s", "YubiKeyへの書き込み失敗: %s"), esp_err_to_name(err));
         if (txn) {
             portENTER_CRITICAL(&s_lock);
             i = tab_find_v(vcid);
@@ -734,10 +735,10 @@ static void handle_mac_packet(uint8_t *pkt)
 
     if (init) {
         ESP_LOGI(TAG, "Mac→Key vCID=%08" PRIx32 " CMD=0x%02x len=%u%s", cid, cmd, bcnt,
-                 is_ready() ? "" : "（バス停止中）");
+                 is_ready() ? "" : YD_L(" (bus suspended)", "（バス停止中）"));
     }
     if (cid == 0) {
-        ESP_LOGW(TAG, "CID=0 のパケットを破棄");
+        ESP_LOGW(TAG, YD_L("Dropping packet with CID=0", "CID=0 のパケットを破棄"));
         return;
     }
 
@@ -754,7 +755,7 @@ static void handle_mac_packet(uint8_t *pkt)
         have_info = s_devinfo.valid;
         portEXIT_CRITICAL(&s_lock);
         if (!have_info) {
-            ESP_LOGI(TAG, "YubiKeyの情報が未取得なので、一度バスを起こして取得します");
+            ESP_LOGI(TAG, YD_L("Key information not available yet: waking the bus to read it", "YubiKeyの情報が未取得なので、一度バスを起こして取得します"));
             ensure_ready();   /* 接続時のセルフテストで s_devinfo が埋まる */
         }
         uint32_t vcid, evicted;
@@ -764,9 +765,9 @@ static void handle_mac_packet(uint8_t *pkt)
         portEXIT_CRITICAL(&s_lock);
         send_init_resp(CTAPHID_BROADCAST, &pkt[7], vcid);
         if (evicted) {
-            ESP_LOGI(TAG, "MacのINITに代答: 仮想CID=%08" PRIx32 " を割当（古いvCID=%08" PRIx32 " を追い出し）", vcid, evicted);
+            ESP_LOGI(TAG, YD_L("Answered the host's INIT: assigned vCID=%08", "MacのINITに代答: 仮想CID=%08") PRIx32 YD_L(" (evicted old vCID=%08", " を割当（古いvCID=%08") PRIx32 YD_L(")", " を追い出し）"), vcid, evicted);
         } else {
-            ESP_LOGI(TAG, "MacのINITに代答: 仮想CID=%08" PRIx32 " を割当", vcid);
+            ESP_LOGI(TAG, YD_L("Answered the host's INIT: assigned vCID=%08", "MacのINITに代答: 仮想CID=%08") PRIx32 YD_L("", " を割当"), vcid);
         }
         return;
     }
@@ -786,7 +787,7 @@ static void handle_mac_packet(uint8_t *pkt)
     valid = dev_valid(&s_tab[i]);
     portEXIT_CRITICAL(&s_lock);
     if (adopted) {
-        ESP_LOGI(TAG, "未知のCID=%08" PRIx32 " を仮想CIDとして登録%s", cid, evicted ? "（LRUで1件追い出し）" : "");
+        ESP_LOGI(TAG, YD_L("Registered unknown CID=%08", "未知のCID=%08") PRIx32 YD_L(" as a virtual CID%s", " を仮想CIDとして登録%s"), cid, evicted ? YD_L(" (evicted one LRU entry)", "（LRUで1件追い出し）") : "");
     }
 
     if (init && cmd == CTAPHID_INIT) {
@@ -800,14 +801,14 @@ static void handle_mac_packet(uint8_t *pkt)
             }
             portEXIT_CRITICAL(&s_lock);
             send_init_resp(cid, &pkt[7], cid);
-            ESP_LOGI(TAG, "チャンネル再同期INITに代答 vCID=%08" PRIx32, cid);
+            ESP_LOGI(TAG, YD_L("Answered channel resync INIT vCID=%08", "チャンネル再同期INITに代答 vCID=%08") PRIx32, cid);
             return;
         }
-        ESP_LOGI(TAG, "処理中のチャンネルへの再同期INIT → YubiKeyへ転送 vCID=%08" PRIx32, cid);
+        ESP_LOGI(TAG, YD_L("Resync INIT on a busy channel → forwarding to the key vCID=%08", "処理中のチャンネルへの再同期INIT → YubiKeyへ転送 vCID=%08") PRIx32, cid);
     }
     if (init && cmd == CTAPHID_CANCEL && !(busy && valid)) {
         /* YubiKey側に中断すべき処理がない（応答もない）ので、起こさずに捨てる */
-        ESP_LOGI(TAG, "処理中の要求がないので CANCEL を破棄 vCID=%08" PRIx32, cid);
+        ESP_LOGI(TAG, YD_L("No request in progress: dropping CANCEL vCID=%08", "処理中の要求がないので CANCEL を破棄 vCID=%08") PRIx32, cid);
         return;
     }
 
@@ -815,14 +816,14 @@ static void handle_mac_packet(uint8_t *pkt)
     for (int attempt = 0; attempt < 2; attempt++) {
         if (!is_ready()) {
             if (!init) {
-                ESP_LOGW(TAG, "YubiKey未準備のため継続パケットを破棄 vCID=%08" PRIx32, cid);
+                ESP_LOGW(TAG, YD_L("Key not ready: dropping continuation packet vCID=%08", "YubiKey未準備のため継続パケットを破棄 vCID=%08") PRIx32, cid);
                 return;
             }
             int64_t t0 = now_us();
             if (!ensure_ready()) {
                 break;
             }
-            ESP_LOGI(TAG, "YubiKey準備完了（待ち %lldms）。キューの要求を流します", (now_us() - t0) / 1000);
+            ESP_LOGI(TAG, YD_L("Key ready (waited %lldms). Sending queued requests", "YubiKey準備完了（待ち %lldms）。キューの要求を流します"), (now_us() - t0) / 1000);
         }
         xSemaphoreTake(s_bus_mutex, portMAX_DELAY);
         if (is_ready()) {
@@ -832,7 +833,7 @@ static void handle_mac_packet(uint8_t *pkt)
         }
         xSemaphoreGive(s_bus_mutex);   /* 直前にサスペンドされた → もう一度起こす */
     }
-    ESP_LOGW(TAG, "YubiKeyが使えないため要求を破棄 vCID=%08" PRIx32 " CMD=0x%02x", cid, cmd);
+    ESP_LOGW(TAG, YD_L("Key unavailable: dropping request vCID=%08", "YubiKeyが使えないため要求を破棄 vCID=%08") PRIx32 " CMD=0x%02x", cid, cmd);
     if (init && cmd != CTAPHID_CANCEL) {
         send_ctaphid_error(cid, CTAPHID_ERR_OTHER);
     }
@@ -870,10 +871,10 @@ static void report_key_state(void)
 static void link_state(bool up, void *arg)
 {
     if (up) {
-        ESP_LOGI(TAG, "レシーバーとBLEで接続しました");
+        ESP_LOGI(TAG, YD_L("Connected to the receiver over BLE", "レシーバーとBLEで接続しました"));
         report_key_state();
     } else {
-        ESP_LOGI(TAG, "レシーバーとのBLE接続が切れました（再接続を待ちます）");
+        ESP_LOGI(TAG, YD_L("BLE connection to the receiver lost (waiting for reconnection)", "レシーバーとのBLE接続が切れました（再接続を待ちます）"));
     }
 }
 
@@ -889,10 +890,10 @@ static void link_rx(uint8_t ch, const uint8_t *data, uint16_t len, void *arg)
         memcpy(p.d, data, FIDO_REPORT_LEN);
         note_activity();
         if (xQueueSend(s_m2k_q, &p, 0) != pdTRUE) {
-            ESP_LOGW(TAG, "Mac→Key キュー溢れ。パケットを破棄 CMD=0x%02x", data[4]);
+            ESP_LOGW(TAG, YD_L("Host→key queue overflow: packet dropped CMD=0x%02x", "Mac→Key キュー溢れ。パケットを破棄 CMD=0x%02x"), data[4]);
         }
     } else if (ch == YD_CH_CTRL && len >= 1 && data[0] == YD_CTRL_HELLO) {
-        ESP_LOGI(TAG, "レシーバー接続を確認");
+        ESP_LOGI(TAG, YD_L("Receiver connection confirmed", "レシーバー接続を確認"));
         /* レシーバーが後から起動した場合に状態を伝え直す。意図的なサスペンド中も「接続済み」 */
         report_key_state();
     }
@@ -904,9 +905,9 @@ static void link_rx(uint8_t ch, const uint8_t *data, uint16_t len, void *arg)
 static const char *itf_class_name(uint8_t cls, uint8_t proto)
 {
     switch (cls) {
-    case 0x03: return proto == 1 ? "HID(キーボード=OTP)" : "HID";
-    case 0x0B: return "CCID(スマートカード=PIV/OpenPGP)";
-    default:   return "その他";
+    case 0x03: return proto == 1 ? YD_L("HID (keyboard = OTP)", "HID(キーボード=OTP)") : "HID";
+    case 0x0B: return YD_L("CCID (smart card = PIV/OpenPGP)", "CCID(スマートカード=PIV/OpenPGP)");
+    default:   return YD_L("other", "その他");
     }
 }
 
@@ -932,7 +933,7 @@ static bool hid_is_fido(uint8_t itf, uint16_t rd_len, bool verbose)
     }
     if (xSemaphoreTake(k.ctrl_done, pdMS_TO_TICKS(1000)) != pdTRUE ||
         k.xfer_ctrl->status != USB_TRANSFER_STATUS_COMPLETED) {
-        ESP_LOGW(TAG, "itf%u: レポートディスクリプタ取得失敗", itf);
+        ESP_LOGW(TAG, YD_L("itf%u: failed to read the report descriptor", "itf%u: レポートディスクリプタ取得失敗"), itf);
         return false;
     }
     const uint8_t *rd = k.xfer_ctrl->data_buffer + sizeof(usb_setup_packet_t);
@@ -955,11 +956,11 @@ static bool open_device(uint8_t addr)
      * 詳細ログは初回 / 本当の抜き挿しのあとだけ */
     bool verbose = !s_key_present;
     if (k.dev) {
-        ESP_LOGW(TAG, "前のデバイスが閉じられていません。新しいデバイスは無視します");
+        ESP_LOGW(TAG, YD_L("Previous device not closed yet: ignoring the new device", "前のデバイスが閉じられていません。新しいデバイスは無視します"));
         return false;
     }
     if (usb_host_device_open(s_client, addr, &k.dev) != ESP_OK) {
-        ESP_LOGE(TAG, "device open失敗 addr=%u", addr);
+        ESP_LOGE(TAG, YD_L("device open failed addr=%u", "device open失敗 addr=%u"), addr);
         k.dev = NULL;
         return false;
     }
@@ -975,11 +976,11 @@ static bool open_device(uint8_t addr)
     usb_host_get_device_descriptor(k.dev, &dd);
     usb_host_get_active_config_descriptor(k.dev, &cd);
     if (verbose) {
-        ESP_LOGI(TAG, "==== USBデバイス接続 VID=%04x PID=%04x ====", dd->idVendor, dd->idProduct);
+        ESP_LOGI(TAG, YD_L("==== USB device attached VID=%04x PID=%04x ====", "==== USBデバイス接続 VID=%04x PID=%04x ===="), dd->idVendor, dd->idProduct);
         usb_print_device_descriptor(dd);
         usb_print_config_descriptor(cd, NULL);
     } else {
-        ESP_LOGI(TAG, "YubiKey再認識 VID=%04x PID=%04x", dd->idVendor, dd->idProduct);
+        ESP_LOGI(TAG, YD_L("Key re-enumerated VID=%04x PID=%04x", "YubiKey再認識 VID=%04x PID=%04x"), dd->idVendor, dd->idProduct);
     }
 
     /* インターフェースを列挙 */
@@ -993,7 +994,7 @@ static bool open_device(uint8_t addr)
             continue;
         }
         if (verbose) {
-            ESP_LOGI(TAG, "itf%u: class=0x%02x proto=%u EP数=%u → %s",
+            ESP_LOGI(TAG, YD_L("itf%u: class=0x%02x proto=%u endpoints=%u → %s", "itf%u: class=0x%02x proto=%u EP数=%u → %s"),
                      itf->bInterfaceNumber, itf->bInterfaceClass, itf->bInterfaceProtocol,
                      itf->bNumEndpoints, itf_class_name(itf->bInterfaceClass, itf->bInterfaceProtocol));
         }
@@ -1038,29 +1039,29 @@ static bool open_device(uint8_t addr)
         }
         k.fido_itf = itf->bInterfaceNumber;
         if (verbose) {
-            ESP_LOGI(TAG, "→ FIDO HID を発見: itf%u EP IN=0x%02x OUT=0x%02x MPS=%u",
+            ESP_LOGI(TAG, YD_L("→ Found FIDO HID: itf%u EP IN=0x%02x OUT=0x%02x MPS=%u", "→ FIDO HID を発見: itf%u EP IN=0x%02x OUT=0x%02x MPS=%u"),
                      k.fido_itf, k.ep_in, k.ep_out, k.mps);
         }
     }
 
     esp_err_t err;
     if (k.fido_itf < 0) {
-        ESP_LOGW(TAG, "FIDOインターフェースが見つかりません（`ykman config usb` でFIDOが有効か確認）");
+        ESP_LOGW(TAG, YD_L("No FIDO interface (check that FIDO is enabled with `ykman config usb`)", "FIDOインターフェースが見つかりません（`ykman config usb` でFIDOが有効か確認）"));
     } else if ((err = usb_host_interface_claim(s_client, k.dev, k.fido_itf, 0)) != ESP_OK) {
-        ESP_LOGE(TAG, "FIDOインターフェースの取得に失敗: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, YD_L("Failed to claim the FIDO interface: %s", "FIDOインターフェースの取得に失敗: %s"), esp_err_to_name(err));
         k.fido_itf = -1;
     }
     bool ccid_ok = false;
     if (ccid_itf) {
         ccid_ok = ccidh_attach(s_client, k.dev, cd, ccid_itf, ccid_off, verbose);
     } else if (verbose) {
-        ESP_LOGW(TAG, "CCIDインターフェースがありません（`ykman config usb` でPIV/OpenPGP/OATHが有効か確認）");
+        ESP_LOGW(TAG, YD_L("No CCID interface (check that PIV/OpenPGP/OATH are enabled with `ykman config usb`)", "CCIDインターフェースがありません（`ykman config usb` でPIV/OpenPGP/OATHが有効か確認）"));
     }
     bool kbd_ok = false;
     if (kbd_itf) {
         kbd_ok = otph_attach(s_client, k.dev, cd, kbd_itf, kbd_off, verbose);
     } else if (verbose) {
-        ESP_LOGW(TAG, "キーボード（OTP）インターフェースがありません（`ykman config usb` でOTPが有効か確認）");
+        ESP_LOGW(TAG, YD_L("No keyboard (OTP) interface (check that OTP is enabled with `ykman config usb`)", "キーボード（OTP）インターフェースがありません（`ykman config usb` でOTPが有効か確認）"));
     }
     if (k.fido_itf < 0) {
         if (!ccid_ok && !kbd_ok) {
@@ -1072,7 +1073,7 @@ static bool open_device(uint8_t addr)
         s_key_present = true;
         report_key_state();
         if (!was) {
-            ESP_LOGI(TAG, "中継開始（FIDOなし）");
+            ESP_LOGI(TAG, YD_L("Relay started (no FIDO)", "中継開始（FIDOなし）"));
         }
         return true;
     }
@@ -1098,16 +1099,16 @@ static bool open_device(uint8_t addr)
     if (err == ESP_OK) {
         if (verbose) {
             uint8_t caps = s_devinfo.caps;
-            ESP_LOGI(TAG, "セルフテストOK: CTAPHID v%u, デバイスFW %u.%u.%u, caps=0x%02x [%s%s%s]",
+            ESP_LOGI(TAG, YD_L("Self-test OK: CTAPHID v%u, device FW %u.%u.%u, caps=0x%02x [%s%s%s]", "セルフテストOK: CTAPHID v%u, デバイスFW %u.%u.%u, caps=0x%02x [%s%s%s]"),
                      s_devinfo.proto, s_devinfo.major, s_devinfo.minor, s_devinfo.build, caps,
                      (caps & 0x01) ? "WINK " : "",
-                     (caps & 0x04) ? "CBOR(FIDO2) " : "U2Fのみ ",
+                     (caps & 0x04) ? "CBOR(FIDO2) " : YD_L("U2F-only ", "U2Fのみ "),
                      (caps & 0x08) ? "NMSG" : "");
         } else {
-            ESP_LOGI(TAG, "セルフテストOK（epoch %" PRIu32 "）", s_epoch);
+            ESP_LOGI(TAG, YD_L("Self-test OK (epoch %", "セルフテストOK（epoch %") PRIu32 YD_L(")", "）"), s_epoch);
         }
     } else {
-        ESP_LOGW(TAG, "セルフテスト応答なし（%s）。中継は開始します", esp_err_to_name(err));
+        ESP_LOGW(TAG, YD_L("No self-test response (%s). Starting the relay anyway", "セルフテスト応答なし（%s）。中継は開始します"), esp_err_to_name(err));
     }
 
     k.relay_on = true;
@@ -1118,7 +1119,7 @@ static bool open_device(uint8_t addr)
     s_key_present = true;
     report_key_state();   /* 復帰（再列挙）のときも送る: CCID が戻ったことをレシーバーに伝える */
     if (!was) {
-        ESP_LOGI(TAG, "中継開始。Macのブラウザで webauthn.io、`gpg --card-status` などを試してください");
+        ESP_LOGI(TAG, YD_L("Relay started. Try webauthn.io in a browser, `gpg --card-status`, etc.", "中継開始。Macのブラウザで webauthn.io、`gpg --card-status` などを試してください"));
     }
     return true;
 }
@@ -1160,18 +1161,18 @@ static void close_device(void)
     portEXIT_CRITICAL(&s_lock);
 
     if (deliberate) {
-        ESP_LOGI(TAG, "YubiKeyをサスペンドしました（意図的な停止なので、レシーバーには取り外しを通知しません。CCIDは使えなくなります）");
+        ESP_LOGI(TAG, YD_L("Key suspended (intentional, so the receiver is not told the key was removed; CCID is unavailable while suspended)", "YubiKeyをサスペンドしました（意図的な停止なので、レシーバーには取り外しを通知しません。CCIDは使えなくなります）"));
         report_key_state();
         return;
     }
-    ESP_LOGI(TAG, "==== USBデバイス取り外し ====");
+    ESP_LOGI(TAG, YD_L("==== USB device removed ====", "==== USBデバイス取り外し ===="));
     if (s_key_present) {
         s_key_present = false;
         s_has_fido = false;
         report_key_state();
     }
     for (int i = 0; i < ndead; i++) {
-        ESP_LOGW(TAG, "処理中だった vCID=%08" PRIx32 " にエラーを返します", dead[i]);
+        ESP_LOGW(TAG, YD_L("Returning an error to in-flight vCID=%08", "処理中だった vCID=%08") PRIx32 YD_L("", " にエラーを返します"), dead[i]);
         send_ctaphid_error(dead[i], CTAPHID_ERR_OTHER);
     }
 }
@@ -1208,7 +1209,7 @@ static void bus_suspend(const char *why, bool require_idle)
 
     esp_err_t err = usb_host_lib_set_root_port_power(false);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "USBバス停止に失敗: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, YD_L("USB bus suspend failed: %s", "USBバス停止に失敗: %s"), esp_err_to_name(err));
         s_bus_state = BUS_ACTIVE;
         if (k.dev && k.fido_itf >= 0) {
             k.relay_on = true;
@@ -1217,7 +1218,7 @@ static void bus_suspend(const char *why, bool require_idle)
         return;
     }
     s_suspend_t0 = now_us();
-    ESP_LOGI(TAG, "■ USBバス停止（%s）。YubiKeyはサスペンドに入ります", why);
+    ESP_LOGI(TAG, YD_L("■ USB bus suspended (%s). The key enters suspend", "■ USBバス停止（%s）。YubiKeyはサスペンドに入ります"), why);
     /* 実際のデバイス解放は DEV_GONE → close_device()。BUS_SUSPENDED への遷移は app_main のループで */
 }
 
@@ -1245,7 +1246,7 @@ static void bus_resume(const char *why)
         vTaskDelay(pdMS_TO_TICKS(20));
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "USBバス再開に失敗: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, YD_L("USB bus resume failed: %s", "USBバス再開に失敗: %s"), esp_err_to_name(err));
         pm_hold(false);
         xEventGroupSetBits(s_evg, EVB_RESUME_FAIL);
         return;
@@ -1253,7 +1254,7 @@ static void bus_resume(const char *why)
     s_bus_state = BUS_RESUMING;
     s_resume_t0 = now_us();
     s_resume_deadline = s_resume_t0 + (int64_t)RESUME_TIMEOUT_MS * 1000;
-    ESP_LOGI(TAG, "▶ USBバス再開（%s）。YubiKeyの再認識を待ちます", why);
+    ESP_LOGI(TAG, YD_L("▶ USB bus resumed (%s). Waiting for the key to re-enumerate", "▶ USBバス再開（%s）。YubiKeyの再認識を待ちます"), why);
 }
 
 static void handle_resume_req(void)
@@ -1264,7 +1265,7 @@ static void handle_resume_req(void)
     switch (s_bus_state) {
     case BUS_SUSPENDED:
     case BUS_SUSPENDING:
-        bus_resume("Macからの要求");
+        bus_resume(YD_L("host request", "Macからの要求"));
         break;
     case BUS_RESUMING:
         break;   /* 再列挙待ち中 */
@@ -1273,7 +1274,7 @@ static void handle_resume_req(void)
         s_bus_state = BUS_RESUMING;
         s_resume_t0 = now_us();
         s_resume_deadline = s_resume_t0 + (int64_t)RESUME_TIMEOUT_MS * 1000;
-        ESP_LOGI(TAG, "YubiKeyが見えないので %d 秒待ちます", RESUME_TIMEOUT_MS / 1000);
+        ESP_LOGI(TAG, YD_L("Key not visible: waiting %d s", "YubiKeyが見えないので %d 秒待ちます"), RESUME_TIMEOUT_MS / 1000);
         break;
     }
 }
@@ -1291,10 +1292,10 @@ static void pm_init(void)
     };
     esp_err_t err = esp_pm_configure(&pc);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_pm_configure 失敗: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, YD_L("esp_pm_configure failed: %s", "esp_pm_configure 失敗: %s"), esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "電源管理: CPU %d〜%dMHz, 自動ライトスリープ=%s", PM_MIN_FREQ_MHZ, PM_MAX_FREQ_MHZ,
-                 LIGHT_SLEEP_ON ? "有効（USBバス停止中のみ）" : "無効");
+        ESP_LOGI(TAG, YD_L("Power management: CPU %d-%dMHz, automatic light sleep=%s", "電源管理: CPU %d〜%dMHz, 自動ライトスリープ=%s"), PM_MIN_FREQ_MHZ, PM_MAX_FREQ_MHZ,
+                 LIGHT_SLEEP_ON ? YD_L("on (only while the USB bus is suspended)", "有効（USBバス停止中のみ）") : YD_L("off", "無効"));
     }
     if (esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb_host", &s_pm_nols) != ESP_OK) {
         s_pm_nols = NULL;
@@ -1324,7 +1325,7 @@ static void pm_init(void)
     gpio_sleep_sel_dis(U0RXD_GPIO_NUM);
 #endif
 #else
-    ESP_LOGW(TAG, "CONFIG_PM_ENABLE が無効のため省電力（DFS/ライトスリープ）は使いません");
+    ESP_LOGW(TAG, YD_L("CONFIG_PM_ENABLE is off: no power saving (DFS / light sleep)", "CONFIG_PM_ENABLE が無効のため省電力（DFS/ライトスリープ）は使いません"));
 #endif
 }
 
@@ -1344,13 +1345,13 @@ static void log_status(void)
 #if YD_USE_UART
     const char *link = "UART";
 #else
-    const char *link = ci.connected ? "接続中" : "未接続";
+    const char *link = ci.connected ? YD_L("connected", "接続中") : YD_L("disconnected", "未接続");
 #endif
-    ESP_LOGI(TAG, "[状態] リンク=%s バス=%s%s 接続パラメータ=%u.%02ums/lat%u/%ums(%s%s) PMロック=%s vCID=%d/%d epoch=%" PRIu32 " 最終通信から%llds",
-             link, bus_state_name(s_bus_state), is_ready() ? "(中継可)" : "",
+    ESP_LOGI(TAG, YD_L("[status] link=%s bus=%s%s conn=%u.%02ums/lat%u/%ums(%s%s) PM lock=%s vCID=%d/%d epoch=%", "[状態] リンク=%s バス=%s%s 接続パラメータ=%u.%02ums/lat%u/%ums(%s%s) PMロック=%s vCID=%d/%d epoch=%") PRIu32 YD_L(" last traffic %llds ago", " 最終通信から%llds"),
+             link, bus_state_name(s_bus_state), is_ready() ? YD_L("(relaying)", "(中継可)") : "",
              itvl_x100 / 100, itvl_x100 % 100, ci.latency, (unsigned)ci.timeout * 10,
-             ci.power_save ? "省電力" : "低遅延", ci.update_pending ? ",更新中" : "",
-             s_pm_held ? "保持(スリープ禁止)" : "解放(ライトスリープ可)",
+             ci.power_save ? YD_L("power save", "省電力") : YD_L("low latency", "低遅延"), ci.update_pending ? YD_L(",updating", ",更新中") : "",
+             s_pm_held ? YD_L("held (no sleep)", "保持(スリープ禁止)") : YD_L("released (light sleep allowed)", "解放(ライトスリープ可)"),
              tab_count(), CID_TABLE_SIZE, epoch, idle_ms / 1000);
 }
 
@@ -1362,7 +1363,7 @@ static void console_task(void *arg)
 {
     /* コンソールUART0の受信だけドライバーで読む（ログの送信はこれまでどおり） */
     if (uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0) != ESP_OK) {
-        ESP_LOGW(TAG, "コンソールUARTの受信を開始できませんでした");
+        ESP_LOGW(TAG, YD_L("Could not start console UART input", "コンソールUARTの受信を開始できませんでした"));
         vTaskDelete(NULL);
     }
     char line[48];
@@ -1375,12 +1376,12 @@ static void console_task(void *arg)
         if (ch == '\r' || ch == '\n') {
             line[n] = 0;
             if (n > 0 && strcmp(line, YD_DL_COMMAND) == 0) {
-                ESP_LOGW(TAG, "ダウンロードモードで再起動します。このシリアルポートから書き込んでください（終わったら電源を挿し直す）");
+                ESP_LOGW(TAG, YD_L("Rebooting into download mode. Flash through this serial port (replug the power afterwards)", "ダウンロードモードで再起動します。このシリアルポートから書き込んでください（終わったら電源を挿し直す）"));
                 vTaskDelay(pdMS_TO_TICKS(200));
                 REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
                 esp_restart();
             } else if (n > 0) {
-                ESP_LOGI(TAG, "コマンド: %s → 不明（使えるのは \"%s\" だけです）", line, YD_DL_COMMAND);
+                ESP_LOGI(TAG, YD_L("Command: %s → unknown (only \"%s\" is supported)", "コマンド: %s → 不明（使えるのは \"%s\" だけです）"), line, YD_DL_COMMAND);
             }
             n = 0;
         } else if (n < sizeof(line) - 1) {
@@ -1395,7 +1396,7 @@ static void console_task(void *arg)
  * ====================================================================== */
 void app_main(void)
 {
-    ESP_LOGI(TAG, "KeyRelay 机上ユニット 起動");
+    ESP_LOGI(TAG, YD_L("KeyRelay desk unit starting", "KeyRelay 机上ユニット 起動"));
     s_app_q = xQueueCreate(8, sizeof(app_ev_t));
     s_m2k_q = xQueueCreate(M2K_QUEUE_LEN, sizeof(rep_t));
     s_evg = xEventGroupCreate();
@@ -1441,15 +1442,15 @@ void app_main(void)
     otph_init();
 #if YD_UART_DOWNLOAD_CMD
     xTaskCreate(console_task, "console", 3072, NULL, 2, NULL);
-    ESP_LOGI(TAG, "ケースを開けずに書き換えるには、このシリアルに \"%s\" と1行送ってください", YD_DL_COMMAND);
+    ESP_LOGI(TAG, YD_L("To reflash without opening the case, send the line \"%s\" on this serial port", "ケースを開けずに書き換えるには、このシリアルに \"%s\" と1行送ってください"), YD_DL_COMMAND);
 #endif
 
-    ESP_LOGI(TAG, "YubiKeyを挿してください（USB-A基板）");
+    ESP_LOGI(TAG, YD_L("Plug in the key (USB-A breakout)", "YubiKeyを挿してください（USB-A基板）"));
 #if YD_BATTERY_POWERED
-    ESP_LOGI(TAG, "無通信 %d 秒でUSBバスを自動停止します。BOOT短押し: 停止/再開（再開後%d秒は自動停止しない）、3秒長押し: ペアリング消去",
+    ESP_LOGI(TAG, YD_L("The USB bus suspends after %d s without traffic. BOOT short press: suspend/resume (no auto-suspend for %d s after resume), hold 3 s: erase pairing", "無通信 %d 秒でUSBバスを自動停止します。BOOT短押し: 停止/再開（再開後%d秒は自動停止しない）、3秒長押し: ペアリング消去"),
              IDLE_SUSPEND_MS / 1000, MANUAL_HOLD_MS / 1000);
 #else
-    ESP_LOGI(TAG, "USB給電モード: USBバスは自動停止しません。BOOT短押し: 停止/再開、3秒長押し: ペアリング消去");
+    ESP_LOGI(TAG, YD_L("USB-powered mode: the USB bus never auto-suspends. BOOT short press: suspend/resume, hold 3 s: erase pairing", "USB給電モード: USBバスは自動停止しません。BOOT短押し: 停止/再開、3秒長押し: ペアリング消去"));
 #endif
 
     gpio_config_t btn = {
@@ -1472,7 +1473,7 @@ void app_main(void)
                 bool ok = open_device(ev.addr);
                 xSemaphoreGive(s_bus_mutex);
                 if (ok && s_bus_state == BUS_RESUMING) {
-                    ESP_LOGI(TAG, "▶ 復帰完了（バス再開から %lldms）", (now_us() - s_resume_t0) / 1000);
+                    ESP_LOGI(TAG, YD_L("▶ Resume complete (%lldms after bus resume)", "▶ 復帰完了（バス再開から %lldms）"), (now_us() - s_resume_t0) / 1000);
                     s_bus_state = BUS_ACTIVE;
                 } else if (ok && s_bus_state == BUS_SUSPENDED) {
                     s_bus_state = BUS_ACTIVE;   /* 念のため */
@@ -1494,7 +1495,7 @@ void app_main(void)
         /* ---- 停止処理の完了待ち ---- */
         if (s_bus_state == BUS_SUSPENDING) {
             if (k.dev && (t - s_suspend_t0) > 1000 * 1000) {
-                ESP_LOGW(TAG, "DEV_GONE が来ないので自分でデバイスを閉じます");
+                ESP_LOGW(TAG, YD_L("No DEV_GONE event: closing the device ourselves", "DEV_GONE が来ないので自分でデバイスを閉じます"));
                 xSemaphoreTake(s_bus_mutex, portMAX_DELAY);
                 close_device();
                 xSemaphoreGive(s_bus_mutex);
@@ -1502,17 +1503,17 @@ void app_main(void)
             if (!k.dev) {
                 s_bus_state = BUS_SUSPENDED;
                 pm_hold(false);
-                ESP_LOGI(TAG, "■ サスペンド完了。PMロック解放（ライトスリープ可）");
+                ESP_LOGI(TAG, YD_L("■ Suspend complete. PM lock released (light sleep allowed)", "■ サスペンド完了。PMロック解放（ライトスリープ可）"));
                 if (s_resume_pending || uxQueueMessagesWaiting(s_m2k_q) > 0 || s_tx_busy) {
                     s_resume_pending = false;
-                    bus_resume("停止中に要求あり");
+                    bus_resume(YD_L("request while suspended", "停止中に要求あり"));
                 }
             }
         }
 
         /* ---- 再開のタイムアウト ---- */
         if (s_bus_state == BUS_RESUMING && !is_ready() && t > s_resume_deadline) {
-            ESP_LOGE(TAG, "YubiKeyが %d 秒以内に再認識されませんでした（抜かれた可能性）", RESUME_TIMEOUT_MS / 1000);
+            ESP_LOGE(TAG, YD_L("The key did not re-enumerate within %d s (it may have been removed)", "YubiKeyが %d 秒以内に再認識されませんでした（抜かれた可能性）"), RESUME_TIMEOUT_MS / 1000);
             s_bus_state = BUS_ACTIVE;   /* 給電したまま、挿し直しを待つ */
             xEventGroupSetBits(s_evg, EVB_RESUME_FAIL);
             if (s_key_present) {
@@ -1531,7 +1532,7 @@ void app_main(void)
             portEXIT_CRITICAL(&s_lock);
             int64_t ccid_idle = t - ccidh_last_activity_us();
             if (!busy && idle >= (int64_t)IDLE_SUSPEND_MS * 1000 && ccid_idle >= (int64_t)IDLE_SUSPEND_MS * 1000) {
-                bus_suspend("無通信", true);
+                bus_suspend(YD_L("idle", "無通信"), true);
             }
         }
 
@@ -1546,21 +1547,21 @@ void app_main(void)
             TickType_t held = xTaskGetTickCount() - pressed_at;
             if (held >= pdMS_TO_TICKS(3000)) {
                 yd_link_forget_peers();
-                ESP_LOGW(TAG, "ペアリング情報を消去しました。レシーバー側も消去してから、両方を再起動してください");
+                ESP_LOGW(TAG, YD_L("Pairing data erased. Erase the receiver's pairing too, then restart both units", "ペアリング情報を消去しました。レシーバー側も消去してから、両方を再起動してください"));
             } else if (s_bus_state == BUS_ACTIVE && is_ready()) {
                 s_manual_hold_until = 0;
-                bus_suspend("BOOTボタン", false);
+                bus_suspend(YD_L("BOOT button", "BOOTボタン"), false);
                 if (s_bus_state == BUS_SUSPENDING) {
-                    ESP_LOGI(TAG, "[電流測定] まもなくの電流値が『サスペンド電流』です");
+                    ESP_LOGI(TAG, YD_L("[current measurement] the current shortly after this is the suspend current", "[電流測定] まもなくの電流値が『サスペンド電流』です"));
                 } else {
-                    ESP_LOGW(TAG, "通信中のため停止できませんでした。もう一度押してください");
+                    ESP_LOGW(TAG, YD_L("Busy, could not suspend. Press again", "通信中のため停止できませんでした。もう一度押してください"));
                 }
             } else if (s_bus_state == BUS_SUSPENDED) {
                 s_manual_hold_until = now_us() + (int64_t)MANUAL_HOLD_MS * 1000;
-                bus_resume("BOOTボタン");
-                ESP_LOGI(TAG, "[電流測定] %d 秒間はバスを止めません（稼働電流を測れます）", MANUAL_HOLD_MS / 1000);
+                bus_resume(YD_L("BOOT button", "BOOTボタン"));
+                ESP_LOGI(TAG, YD_L("[current measurement] the bus stays up for %d s (measure the active current)", "[電流測定] %d 秒間はバスを止めません（稼働電流を測れます）"), MANUAL_HOLD_MS / 1000);
             } else {
-                ESP_LOGW(TAG, "バス状態=%s のためボタン操作を無視しました", bus_state_name(s_bus_state));
+                ESP_LOGW(TAG, YD_L("Button ignored in bus state=%s", "バス状態=%s のためボタン操作を無視しました"), bus_state_name(s_bus_state));
             }
             vTaskDelay(pdMS_TO_TICKS(100));   /* チャタリング防止 */
         }
@@ -1572,7 +1573,7 @@ void app_main(void)
             yd_link_get_stats(&st);
             static uint32_t last_rx = UINT32_MAX, last_err = UINT32_MAX;
             if (st.rx_frames != last_rx || st.rx_crc_errors != last_err) {
-                ESP_LOGI(TAG, "link統計: レシーバーから受信=%" PRIu32 " CRCエラー=%" PRIu32 " 送信=%" PRIu32 " 送信破棄=%" PRIu32,
+                ESP_LOGI(TAG, YD_L("link stats: received from receiver=%", "link統計: レシーバーから受信=%") PRIu32 YD_L(" CRC errors=%", " CRCエラー=%") PRIu32 YD_L(" sent=%", " 送信=%") PRIu32 YD_L(" send drops=%", " 送信破棄=%") PRIu32,
                          st.rx_frames, st.rx_crc_errors, st.tx_frames, st.tx_dropped);
                 last_rx = st.rx_frames; last_err = st.rx_crc_errors;
             }

@@ -21,6 +21,7 @@
 #include "yd_frag.h"
 #include "yd_ccid.h"
 #include "ccid_host.h"
+#include "yd_lang.h"
 
 static const char *TAG = "ccid";
 
@@ -89,7 +90,7 @@ static const char *type_name(uint8_t t)
  * ====================================================================== */
 static void up_drop(const char *why)
 {
-    ESP_LOGW(TAG, "YubiKeyからの応答を破棄: %s", why);
+    ESP_LOGW(TAG, YD_L("Dropping response from the key: %s", "YubiKeyからの応答を破棄: %s"), why);
     s_up_len = 0;
 }
 
@@ -103,12 +104,12 @@ static void up_packet(const uint8_t *p, size_t n)
     }
     if (n == 0) {
         if (s_up_len) {
-            up_drop("長さが足りない");
+            up_drop(YD_L("too short", "長さが足りない"));
         }
         return;
     }
     if (s_up_len + n > sizeof(s_up_asm)) {
-        up_drop("長すぎる");
+        up_drop(YD_L("too long", "長すぎる"));
         s_up_discard = (n == c.mps);
         return;
     }
@@ -117,14 +118,14 @@ static void up_packet(const uint8_t *p, size_t n)
     if (s_up_len >= YD_CCID_HDR) {
         uint32_t dl = yd_ccid_dwlen(s_up_asm);
         if (dl > sizeof(s_up_asm) - YD_CCID_HDR) {
-            up_drop("dwLength が上限超え");
+            up_drop(YD_L("dwLength over the limit", "dwLength が上限超え"));
             s_up_discard = (n == c.mps);
             return;
         }
         size_t total = YD_CCID_HDR + dl;
         if (s_up_len >= total) {
             if (xMessageBufferSend(s_up_mb, s_up_asm, total, 0) != total) {
-                ESP_LOGW(TAG, "応答キューが一杯のため破棄");
+                ESP_LOGW(TAG, YD_L("Response queue full: dropped", "応答キューが一杯のため破棄"));
             }
             s_up_len = 0;
             kick();
@@ -132,7 +133,7 @@ static void up_packet(const uint8_t *p, size_t n)
         }
     }
     if (n < c.mps) {
-        up_drop("途中で終わった");
+        up_drop(YD_L("truncated", "途中で終わった"));
     }
 }
 
@@ -182,7 +183,7 @@ bool ccidh_attach(usb_host_client_handle_t client, usb_device_handle_t dev, cons
         }
     }
     if (!ep_in || !ep_out || mps == 0 || mps > 64) {
-        ESP_LOGW(TAG, "CCIDのbulkエンドポイントが見つかりません");
+        ESP_LOGW(TAG, YD_L("CCID bulk endpoints not found", "CCIDのbulkエンドポイントが見つかりません"));
         return false;
     }
 
@@ -199,14 +200,14 @@ bool ccidh_attach(usb_host_client_handle_t client, usb_device_handle_t dev, cons
                      protocols, features, maxmsg, b[53]);
         }
         if ((features & 0x00070000) != 0x00040000 || maxmsg > YD_CCID_MAX_MSG) {
-            ESP_LOGW(TAG, "この YubiKey の CCID の性質がレシーバーの想定（APDU単位・最大%d）と違います。動かなければログを送ってください",
+            ESP_LOGW(TAG, YD_L("This key's CCID properties differ from what the receiver assumes (APDU level, max %d). If it does not work, please send this log", "この YubiKey の CCID の性質がレシーバーの想定（APDU単位・最大%d）と違います。動かなければログを送ってください"),
                      YD_CCID_MAX_MSG);
         }
     }
 
     esp_err_t err = usb_host_interface_claim(client, dev, itf->bInterfaceNumber, 0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "CCIDインターフェースの取得に失敗: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, YD_L("Failed to claim the CCID interface: %s", "CCIDインターフェースの取得に失敗: %s"), esp_err_to_name(err));
         return false;
     }
     xSemaphoreTake(c.mutex, portMAX_DELAY);
@@ -235,7 +236,7 @@ bool ccidh_attach(usb_host_client_handle_t client, usb_device_handle_t dev, cons
         }
     }
     xSemaphoreGive(c.mutex);
-    ESP_LOGI(TAG, "→ CCID（スマートカード）を取得: itf%u EP IN=0x%02x OUT=0x%02x MPS=%u", c.itf, ep_in, ep_out, mps);
+    ESP_LOGI(TAG, YD_L("→ Claimed CCID (smart card): itf%u EP IN=0x%02x OUT=0x%02x MPS=%u", "→ CCID（スマートカード）を取得: itf%u EP IN=0x%02x OUT=0x%02x MPS=%u"), c.itf, ep_in, ep_out, mps);
     kick();
     return true;
 }
@@ -278,7 +279,7 @@ static void reply(const uint8_t *m, size_t n)
 {
     esp_err_t err = yd_frag_send(YD_CH_CCID, m, n);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "レシーバーへの応答送信に失敗: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, YD_L("Failed to send the response to the receiver: %s", "レシーバーへの応答送信に失敗: %s"), esp_err_to_name(err));
     }
 }
 
@@ -313,12 +314,12 @@ static esp_err_t write_key(const uint8_t *m, size_t n)
 static void handle_req(const uint8_t *m, size_t n)
 {
     if (!yd_ccid_valid(m, n)) {
-        ESP_LOGW(TAG, "形式不正の要求を破棄 (len=%u)", (unsigned)n);
+        ESP_LOGW(TAG, YD_L("Dropping malformed request (len=%u)", "形式不正の要求を破棄 (len=%u)"), (unsigned)n);
         return;
     }
     s_last_us = esp_timer_get_time();
     if (!c.attached) {
-        ESP_LOGW(TAG, "%s が届いたがCCIDが使えないので「カードなし」で応答", type_name(m[0]));
+        ESP_LOGW(TAG, YD_L("%s received but CCID is unavailable: replying \"no card\"", "%s が届いたがCCIDが使えないので「カードなし」で応答"), type_name(m[0]));
         reply_absent(m);
         return;
     }
@@ -328,7 +329,7 @@ static void handle_req(const uint8_t *m, size_t n)
     s_pend.t0 = esp_timer_get_time();
     esp_err_t err = write_key(m, n);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "YubiKeyへの書き込み失敗 (%s)。%s seq=%u", esp_err_to_name(err), type_name(m[0]), m[6]);
+        ESP_LOGW(TAG, YD_L("Write to the key failed (%s). %s seq=%u", "YubiKeyへの書き込み失敗 (%s)。%s seq=%u"), esp_err_to_name(err), type_name(m[0]), m[6]);
         s_pend.active = false;
         reply_absent(m);
         return;
@@ -344,11 +345,11 @@ static void handle_rsp(const uint8_t *m, size_t n)
         static int64_t last_te_log;
         if (s_last_us - last_te_log > 3000000) {
             last_te_log = s_last_us;
-            ESP_LOGI(TAG, "Key→Mac 時間延長（タッチ待ちなど）seq=%u", m[6]);
+            ESP_LOGI(TAG, YD_L("Key→host time extension (waiting for touch etc.) seq=%u", "Key→Mac 時間延長（タッチ待ちなど）seq=%u"), m[6]);
         }
     } else {
         int64_t ms = (s_pend.active && s_pend.seq == m[6]) ? (s_last_us - s_pend.t0) / 1000 : -1;
-        ESP_LOGI(TAG, "Key→Mac 0x%02x seq=%u len=%u status=0x%02x err=0x%02x（%lldms）",
+        ESP_LOGI(TAG, YD_L("Key→host 0x%02x seq=%u len=%u status=0x%02x err=0x%02x (%lldms)", "Key→Mac 0x%02x seq=%u len=%u status=0x%02x err=0x%02x（%lldms）"),
                  m[0], m[6], (unsigned)(n - YD_CCID_HDR), m[7], m[8], ms);
         s_pend.active = false;
     }
@@ -380,12 +381,12 @@ void ccidh_from_link(const uint8_t *data, uint16_t len)
 {
     int n = yd_frag_rx_feed(&s_down_rx, data, len);
     if (n < 0) {
-        ESP_LOGW(TAG, "レシーバーからの要求が欠けていたので破棄");
+        ESP_LOGW(TAG, YD_L("Request from the receiver was incomplete: dropped", "レシーバーからの要求が欠けていたので破棄"));
         return;
     }
     if (n > 0) {
         if (xMessageBufferSend(s_down_mb, s_down_asm, n, pdMS_TO_TICKS(200)) != (size_t)n) {
-            ESP_LOGW(TAG, "要求キューが一杯のため破棄");
+            ESP_LOGW(TAG, YD_L("Request queue full: dropped", "要求キューが一杯のため破棄"));
         }
         kick();
     }

@@ -26,6 +26,7 @@
 #include "esp_timer.h"
 #include "yd_link.h"
 #include "hid_dev.h"
+#include "yd_lang.h"
 
 static const char *TAG = "otp";
 
@@ -135,7 +136,7 @@ static void ctl_push(uint8_t op, uint8_t tag, const uint8_t *d)
         memcpy(r.d, d, YD_OTPCTL_REPORT_LEN);
     }
     if (xQueueSend(s_ctl_q, &r, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "フィーチャーレポートのキューが一杯");
+        ESP_LOGW(TAG, YD_L("Feature report queue full", "フィーチャーレポートのキューが一杯"));
     }
     if (s_ctl_task) {
         xTaskNotifyGive(s_ctl_task);
@@ -352,7 +353,7 @@ bool hid_dev_fido_send(const uint8_t *report, uint32_t timeout_ms)
             if (usbd_edpt_xfer(0, s_fido_ep_in, s_fido_in_buf, FIDO_REPORT_LEN, false)) {
                 /* Mac が受け取るまで待ってから次へ（順序と取りこぼし防止） */
                 if (xSemaphoreTake(s_fido_sem, pdMS_TO_TICKS(500)) != pdTRUE) {
-                    ESP_LOGW(TAG, "FIDO: INレポートの完了通知なし");
+                    ESP_LOGW(TAG, YD_L("FIDO: no completion for the IN report", "FIDO: INレポートの完了通知なし"));
                 }
                 return true;
             }
@@ -402,7 +403,7 @@ static void kbd_task(void *arg)
     for (;;) {
         if (xQueueReceive(s_kbd_q, &r, pressed ? pdMS_TO_TICKS(KBD_STUCK_MS) : portMAX_DELAY) != pdTRUE) {
             static const uint8_t zero[KBD_REPORT_LEN] = { 0 };
-            ESP_LOGW(TAG, "キーが押されたまま続きが来ないので離します");
+            ESP_LOGW(TAG, YD_L("Key held without further reports: releasing", "キーが押されたまま続きが来ないので離します"));
             kbd_send(zero);
             pressed = false;
             continue;
@@ -414,11 +415,11 @@ static void kbd_task(void *arg)
             kbd_send(eisu);
             kbd_send(up);
             vTaskDelay(pdMS_TO_TICKS(KBD_EISU_SETTLE_MS));
-            ESP_LOGI(TAG, "OTP入力: 先に「英数」キーを送りました");
+            ESP_LOGI(TAG, YD_L("OTP: sent the Eisu (LANG2) key first", "OTP入力: 先に「英数」キーを送りました"));
         }
 #endif
         if (!kbd_send(r.d)) {
-            ESP_LOGW(TAG, "キーボードの送信待ちタイムアウト（Macに未接続？）");
+            ESP_LOGW(TAG, YD_L("Keyboard send timed out (not connected to the host?)", "キーボードの送信待ちタイムアウト（Macに未接続？）"));
         }
         pressed = kbd_has_keys(r.d);
         last = xTaskGetTickCount();
@@ -453,12 +454,12 @@ static void ctl_task(void *arg)
             int64_t t = now_ms();
             if (t - last_log > 3000) {
                 last_log = t;
-                ESP_LOGI(TAG, "フィーチャーレポート中継中（チャレンジレスポンス / スロット設定）累計 %lu 回",
+                ESP_LOGI(TAG, YD_L("Relaying feature reports (challenge-response / slot configuration), total %lu", "フィーチャーレポート中継中（チャレンジレスポンス / スロット設定）累計 %lu 回"),
                          (unsigned long)s_ctl_count);
             }
         }
         if (s_get_pending && now_ms() - s_get_t0 > GET_TIMEOUT_MS) {
-            ESP_LOGW(TAG, "机上ユニットから GET_REPORT の返事がないので STALL で返します");
+            ESP_LOGW(TAG, YD_L("No GET_REPORT reply from the desk unit: STALLing", "机上ユニットから GET_REPORT の返事がないので STALL で返します"));
             usbd_defer_func(get_finish, (void *)(uintptr_t)s_get_tag, false);
             s_get_t0 = now_ms();   /* get_finish が処理するまで連打しない */
         }
@@ -487,7 +488,7 @@ void hid_dev_kbd_from_link(const uint8_t *data, uint16_t len)
         kbd_rep_t r;
         memcpy(r.d, data + off, KBD_REPORT_LEN);
         if (xQueueSend(s_kbd_q, &r, pdMS_TO_TICKS(100)) != pdTRUE) {
-            ESP_LOGW(TAG, "キーボードのキューが一杯。入力を破棄");
+            ESP_LOGW(TAG, YD_L("Keyboard queue full: input dropped", "キーボードのキューが一杯。入力を破棄"));
             break;
         }
     }

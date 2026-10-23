@@ -23,6 +23,7 @@
 #include "sdkconfig.h"
 #include "yd_link.h"
 #include "driver/gpio.h"
+#include "yd_lang.h"
 
 static const char *TAG = "recv";
 
@@ -132,7 +133,7 @@ static void fido_rx(const uint8_t *rep)
         ESP_LOGI(TAG, "Mac→ CID=%02x%02x%02x%02x CMD=0x%02x", rep[0], rep[1], rep[2], rep[3], rep[4]);
     }
     if (!s_key_attached) {
-        ESP_LOGW(TAG, "Macから要求あり (CMD=0x%02x) だがYubiKey未接続", rep[4]);
+        ESP_LOGW(TAG, YD_L("Request from the host (CMD=0x%02x) but no key attached", "Macから要求あり (CMD=0x%02x) だがYubiKey未接続"), rep[4]);
     }
     yd_link_send(YD_CH_FIDO, rep, FIDO_REPORT_LEN);
 }
@@ -154,22 +155,22 @@ static void link_rx(uint8_t ch, const uint8_t *data, uint16_t len, void *arg)
         report_t r;
         memcpy(r.data, data, FIDO_REPORT_LEN);
         if (xQueueSend(s_to_host_q, &r, pdMS_TO_TICKS(100)) != pdTRUE) {
-            ESP_LOGW(TAG, "to_host キュー溢れ");
+            ESP_LOGW(TAG, YD_L("to_host queue overflow", "to_host キュー溢れ"));
         }
     } else if (ch == YD_CH_CTRL && len >= 1) {
         switch (data[0]) {
         case YD_CTRL_KEY_ATTACHED: {
             uint8_t caps = len >= 2 ? data[1] : YD_KEY_CAP_FIDO;   /* 旧版の机上ユニットは FIDO のみ */
             s_key_attached = true;
-            ESP_LOGI(TAG, "机上ユニット: YubiKey 接続済み [%s%s]", (caps & YD_KEY_CAP_FIDO) ? "FIDO " : "",
+            ESP_LOGI(TAG, YD_L("Desk unit: key attached [%s%s]", "机上ユニット: YubiKey 接続済み [%s%s]"), (caps & YD_KEY_CAP_FIDO) ? "FIDO " : "",
                      (caps & YD_KEY_CAP_CCID) ? "CCID" : "");
             ccid_dev_set_card((caps & YD_KEY_CAP_CCID) != 0);
             hid_dev_set_otp_caps(YD_KBD_ENABLED && (caps & YD_KEY_CAP_OTP) != 0, (caps & YD_KEY_CAP_OTPCTL) != 0);
             if (!YD_KBD_ENABLED) {
-                ESP_LOGI(TAG, "  OTP キーボードは無効のビルド（CONFIG_YD_OTP_KEYBOARD=n）。タッチでの OTP 入力はしません");
+                ESP_LOGI(TAG, YD_L("  OTP keyboard disabled in this build (CONFIG_YD_OTP_KEYBOARD=n): touch OTPs are not typed", "  OTP キーボードは無効のビルド（CONFIG_YD_OTP_KEYBOARD=n）。タッチでの OTP 入力はしません"));
             } else if (caps & YD_KEY_CAP_OTP) {
-                ESP_LOGI(TAG, "  OTP（キーボード）も中継します%s",
-                         (caps & YD_KEY_CAP_OTPCTL) ? "（チャレンジレスポンス・スロット設定も）" : "");
+                ESP_LOGI(TAG, YD_L("  Relaying OTP (keyboard) too%s", "  OTP（キーボード）も中継します%s"),
+                         (caps & YD_KEY_CAP_OTPCTL) ? YD_L(" (plus challenge-response and slot configuration)", "（チャレンジレスポンス・スロット設定も）") : "");
             }
             break;
         }
@@ -177,10 +178,10 @@ static void link_rx(uint8_t ch, const uint8_t *data, uint16_t len, void *arg)
             s_key_attached = false;
             ccid_dev_set_card(false);
             hid_dev_set_otp_caps(false, false);
-            ESP_LOGI(TAG, "机上ユニット: YubiKey 未接続");
+            ESP_LOGI(TAG, YD_L("Desk unit: no key attached", "机上ユニット: YubiKey 未接続"));
             break;
         case YD_CTRL_HELLO:
-            ESP_LOGI(TAG, "机上ユニットが起動");
+            ESP_LOGI(TAG, YD_L("Desk unit started", "机上ユニットが起動"));
             break;
         }
     }
@@ -193,7 +194,7 @@ static void to_host_task(void *arg)
         xQueueReceive(s_to_host_q, &r, portMAX_DELAY);
 
         if (!hid_dev_fido_send(r.data, 2000)) {
-            ESP_LOGW(TAG, "HID送信待ちタイムアウト、レポート破棄 (CMD=0x%02x)", r.data[4]);
+            ESP_LOGW(TAG, YD_L("HID send timed out, report dropped (CMD=0x%02x)", "HID送信待ちタイムアウト、レポート破棄 (CMD=0x%02x)"), r.data[4]);
             continue;
         }
         if (r.data[4] & 0x80) {
@@ -206,13 +207,13 @@ static void to_host_task(void *arg)
 static void link_state(bool up, void *arg)
 {
     if (up) {
-        ESP_LOGI(TAG, "机上ユニットとBLEで接続しました");
+        ESP_LOGI(TAG, YD_L("Connected to the desk unit over BLE", "机上ユニットとBLEで接続しました"));
         yd_link_send_ctrl(YD_CTRL_HELLO);   /* → 机上ユニットがYubiKeyの状態を返す */
     } else {
         s_key_attached = false;
         ccid_dev_set_card(false);
         hid_dev_set_otp_caps(false, false);
-        ESP_LOGI(TAG, "机上ユニットとのBLE接続が切れました（再接続を試みます）");
+        ESP_LOGI(TAG, YD_L("BLE connection to the desk unit lost (reconnecting)", "机上ユニットとのBLE接続が切れました（再接続を試みます）"));
     }
 }
 
@@ -232,7 +233,7 @@ static void button_task(void *arg)
             held_ms += 50;
             if (held_ms == 3000) {
                 yd_link_forget_peers();
-                ESP_LOGW(TAG, "ペアリング情報を消去しました。机上ユニット側も消去してから、両方を再起動してください");
+                ESP_LOGW(TAG, YD_L("Pairing data erased. Erase the desk unit's pairing too, then restart both units", "ペアリング情報を消去しました。机上ユニット側も消去してから、両方を再起動してください"));
             }
         } else {
             held_ms = 0;
@@ -243,15 +244,15 @@ static void button_task(void *arg)
 static void usb_event_cb(tinyusb_event_t *event, void *arg)
 {
     if (event->id == TINYUSB_EVENT_ATTACHED) {
-        ESP_LOGI(TAG, "Macに接続されました（FIDOキー＋スマートカードリーダー＋キーボードとして認識されるはず）");
+        ESP_LOGI(TAG, YD_L("Connected to the host (should appear as a FIDO key, a smart-card reader and a keyboard)", "Macに接続されました（FIDOキー＋スマートカードリーダー＋キーボードとして認識されるはず）"));
     } else if (event->id == TINYUSB_EVENT_DETACHED) {
-        ESP_LOGI(TAG, "Macから切断");
+        ESP_LOGI(TAG, YD_L("Disconnected from the host", "Macから切断"));
     }
 }
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "KeyRelay レシーバー 起動");
+    ESP_LOGI(TAG, YD_L("KeyRelay receiver starting", "KeyRelay レシーバー 起動"));
     s_to_host_q = xQueueCreate(16, sizeof(report_t));
     xTaskCreate(to_host_task, "to_host", 4096, NULL, 11, NULL);
     ccid_dev_init();
@@ -279,5 +280,5 @@ void app_main(void)
     tc.descriptor.string_count = sizeof(s_strings) / sizeof(s_strings[0]);
     tc.descriptor.full_speed_config = s_cfg_desc;
     ESP_ERROR_CHECK(tinyusb_driver_install(&tc));
-    ESP_LOGI(TAG, "USB起動。ネイティブUSB側のUSB-CをMacに挿してください");
+    ESP_LOGI(TAG, YD_L("USB started. Plug the native USB port into the computer", "USB起動。ネイティブUSB側のUSB-CをMacに挿してください"));
 }
