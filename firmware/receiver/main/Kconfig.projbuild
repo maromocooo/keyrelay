@@ -1,0 +1,15 @@
+menu "KeyRelay"
+
+config YD_OTP_KEYBOARD
+    bool "OTP keyboard interface (types the key's OTP on touch)"
+    default y
+    help
+        The receiver shows up as a USB keyboard so that the security key's OTP can be typed when
+        you touch it. If you do not use OTPs, turn this off: the receiver then has no keyboard
+        interface at all (FIDO + smart card only), which removes the keystroke-injection risk
+        described in SECURITY.md. OTP challenge-response through the FIDO interface keeps working.
+
+        OTP（タッチでの入力）を使わないなら n。レシーバーからキーボードの口がなくなり、
+        SECURITY.md の「キー入力の差し込み」の危険がなくなる。
+
+endmenu
