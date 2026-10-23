@@ -74,6 +74,8 @@ idf.py -C firmware/desk_unit set-target esp32s3 build merge-bin -o keyrelay_desk
 ## まだできないこと・今後
 
 - USB ID: 既定のビルドは pid.codes の**テスト用** PID `0x1209:0x0001` を使っています（他と重なりうる）。
+  pid.codes はテスト用 PID の機器を人に配ることを認めていないので、専用の PID が取れるまでは
+  ビルド済みのファームを配りません。自分で使う分を、自分でビルドしてください。
   公開したので、pid.codes に専用の PID を申請する予定です。
 - ケースは USB-A キー用だけです。USB-C キー版と電池版の机上ユニットは今後。
 - 要求は同時に1つずつ（キー自体と同じ）。BLE が切れるとパソコンからはカードを抜いたように見え、

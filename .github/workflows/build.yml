@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install mbedtls
         run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
-      - name: Host unit tests (fragmentation, link security)
+      - name: Host unit tests (fragmentation, link security, bond policy)
         run: make -C firmware/tests/host
 
   firmware:
@@ -34,6 +34,8 @@ jobs:
             variant: uart-download
           - project: receiver
             variant: no-keyboard
+    # Compile check only. No firmware is published: the default build uses the pid.codes test PID
+    # 0x1209:0x0001, which must not be distributed. Build from source (docs/BUILD.md).
     steps:
       - uses: actions/checkout@v4
       - name: Build
@@ -51,10 +53,3 @@ jobs:
           fi
           idf.py set-target esp32s3
           idf.py build merge-bin -o "keyrelay_${{ matrix.project }}_full.bin"
-      - name: Upload merged binary
-        if: matrix.variant == 'default'
-        uses: actions/upload-artifact@v4
-        with:
-          name: keyrelay_${{ matrix.project }}
-          path: firmware/${{ matrix.project }}/build/keyrelay_${{ matrix.project }}_full.bin
-          if-no-files-found: error

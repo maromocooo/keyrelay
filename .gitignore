@@ -15,6 +15,7 @@ ydkey.bin
 # Host tests / Python
 firmware/tests/host/test_frag
 firmware/tests/host/test_sec
+firmware/tests/host/test_bond_policy
 __pycache__/
 *.pyc
 .DS_Store
