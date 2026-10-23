@@ -231,9 +231,20 @@ esptool.py --chip esp32s3 -p ポート write_flash 0x10000 firmware/desk_unit/bu
 3. screen を閉じる（`Ctrl-A` → `K` → `y`）。開いたままだと書き込みツールがポートを使えない
 4. アプリを書き込む:
    ```sh
-   esptool.py --chip esp32s3 -p ポート --before no_reset write_flash 0x10000 firmware/desk_unit/build/keyrelay_desk_unit.bin
+   esptool.py --chip esp32s3 -p ポート -b 115200 --before no_reset write_flash 0x10000 firmware/desk_unit/build/keyrelay_desk_unit.bin
    ```
 5. USB-C を挿し直す（変換基板の DTR/RTS をつないでいないので、自動では再起動しない）
+
+CP2102N 経由で書くときの注意:
+
+- **速度は 115200bps のままにする。** 変換基板までのジャンパー線では、速くすると書き込みが壊れることが
+  あります。esptool-js では、*Connect* を押す前に *Baudrate* を 115200 にします。
+- **CP2102N のポートを選ぶ**（`cu.usbserial-…`、「CP2102N USB to UART Bridge」、ベンダー ID `0x10c4`）。
+  「USB JTAG/serial debug unit」（ベンダー ID `0x303a`）は XIAO 自身の USB で、XIAO を直接つないだときに
+  だけ出ます。
+- **`invalid header` や `Invalid image block, can't boot` で再起動を繰り返す**ときは、書き込みが途中で
+  壊れています。ケースを開け、5章と同じように XIAO 自身の USB-C から、まとめたイメージと鍵を書き直して
+  ください。BLE のペアリング情報も消えますが、2台は自分でペアリングし直します。
 
 ## 10. BOOT ボタンと、別の機器とのペアリング
 

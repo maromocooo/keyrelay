@@ -237,10 +237,21 @@ The receiver is updated the same way through its COM port.
 3. Quit screen (`Ctrl-A`, `K`, `y`). The port must be free for the flasher.
 4. Flash the app:
    ```sh
-   esptool.py --chip esp32s3 -p PORT --before no_reset write_flash 0x10000 firmware/desk_unit/build/keyrelay_desk_unit.bin
+   esptool.py --chip esp32s3 -p PORT -b 115200 --before no_reset write_flash 0x10000 firmware/desk_unit/build/keyrelay_desk_unit.bin
    ```
 5. Unplug and replug the USB-C: the unit does not reset by itself (the module's DTR/RTS lines are not
    wired).
+
+Notes for flashing through the CP2102N:
+
+- **Stay at 115200 baud.** Faster rates over the module's jumper wires can corrupt the write. In
+  esptool-js, set *Baudrate* to 115200 before pressing *Connect*.
+- **Pick the CP2102N port** (`cu.usbserial-…`, "CP2102N USB to UART Bridge", vendor ID `0x10c4`).
+  "USB JTAG/serial debug unit" (vendor ID `0x303a`) is the XIAO's own USB port, which only appears when
+  the XIAO itself is connected.
+- **If the unit boot-loops** with `invalid header` or `Invalid image block, can't boot`, the write was
+  incomplete. Open the case and flash the merged image and the key through the XIAO's own USB-C, as in
+  section 5. This also clears the BLE pairing; the units pair again on their own.
 
 ## 10. BOOT buttons and pairing a different unit
 
