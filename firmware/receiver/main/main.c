@@ -130,7 +130,7 @@ static volatile bool s_key_attached;
 static void fido_rx(const uint8_t *rep)
 {
     if (rep[4] & 0x80) {
-        ESP_LOGI(TAG, "Mac→ CID=%02x%02x%02x%02x CMD=0x%02x", rep[0], rep[1], rep[2], rep[3], rep[4]);
+        ESP_LOGI(TAG, YD_L("Host→ CID=%02x%02x%02x%02x CMD=0x%02x", "Mac→ CID=%02x%02x%02x%02x CMD=0x%02x"), rep[0], rep[1], rep[2], rep[3], rep[4]);
     }
     if (!s_key_attached) {
         ESP_LOGW(TAG, YD_L("Request from the host (CMD=0x%02x) but no key attached", "Macから要求あり (CMD=0x%02x) だがYubiKey未接続"), rep[4]);
@@ -198,7 +198,7 @@ static void to_host_task(void *arg)
             continue;
         }
         if (r.data[4] & 0x80) {
-            ESP_LOGI(TAG, "→Mac CMD=0x%02x", r.data[4]);
+            ESP_LOGI(TAG, YD_L("→host CMD=0x%02x", "→Mac CMD=0x%02x"), r.data[4]);
         }
     }
 }

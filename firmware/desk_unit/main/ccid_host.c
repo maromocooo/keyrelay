@@ -334,7 +334,7 @@ static void handle_req(const uint8_t *m, size_t n)
         reply_absent(m);
         return;
     }
-    ESP_LOGI(TAG, "Mac→Key %s seq=%u len=%u", type_name(m[0]), m[6], (unsigned)(n - YD_CCID_HDR));
+    ESP_LOGI(TAG, YD_L("Host→key %s seq=%u len=%u", "Mac→Key %s seq=%u len=%u"), type_name(m[0]), m[6], (unsigned)(n - YD_CCID_HDR));
 }
 
 static void handle_rsp(const uint8_t *m, size_t n)

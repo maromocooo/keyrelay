@@ -376,7 +376,7 @@ static void handle_host(const uint8_t *m, size_t n, bool card)
     s_pend.len = n - YD_CCID_HDR;
     memcpy(s_pend.hdr, m, YD_CCID_HDR);
     s_pend.t_start = s_pend.t_desk = s_pend.t_mac = t;
-    ESP_LOGI(TAG, "Mac→ %s seq=%u len=%u", type_name(type), seq, (unsigned)(n - YD_CCID_HDR));
+    ESP_LOGI(TAG, YD_L("Host→ %s seq=%u len=%u", "Mac→ %s seq=%u len=%u"), type_name(type), seq, (unsigned)(n - YD_CCID_HDR));
 }
 
 static void handle_desk(const uint8_t *m, size_t n)
