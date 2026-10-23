@@ -9,7 +9,7 @@ plugged into your computer. Touch the key on your desk; your computer can stay c
 [日本語の README はこちら](docs/ja/README.md)
 
 > **Status:** a working personal build, published as is. Tested on macOS with one YubiKey 5 NFC
-> (firmware 5.1.2). Windows and Linux hosts are untested. Firmware log messages are in Japanese.
+> (firmware 5.1.2). Windows and Linux hosts are untested.
 > Secure boot and flash encryption are not set up yet, so treat a unit like the key itself and read
 > [SECURITY.md](SECURITY.md) before relying on it.
 
@@ -58,7 +58,7 @@ Browsers (FIDO), GnuPG and typed OTPs work as is.
 ## Building one
 
 See **[docs/BUILD.md](docs/BUILD.md)** ([日本語](docs/ja/BUILD.md)) for the parts list, wiring,
-firmware build, key provisioning and case assembly. Design notes and example logs (Japanese) are in
+firmware build, key provisioning and case assembly. Design notes and example logs (in Japanese, with the Japanese log setting) are in
 [docs/ja/DEV_NOTES.md](docs/ja/DEV_NOTES.md). In short, from the repository root:
 
 ```sh
@@ -91,7 +91,8 @@ docs/                   build guide (English / Japanese), images
 - Only the USB-A key variant has a case. A USB-C key variant and a battery-powered desk unit are planned.
 - One request at a time per interface (same as the key itself). If the BLE link drops, the computer sees
   the smart card being removed, and PIN state is lost.
-- Firmware log messages are in Japanese.
+- Serial log messages are in English by default. Japanese can be selected in `idf.py menuconfig` →
+  KeyRelay log language.
 - Secure boot, flash encryption and NVS encryption are not set up by default. A draft guide is in
   [docs/HARDENING.md](docs/HARDENING.md) (untested).
 

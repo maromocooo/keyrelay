@@ -165,7 +165,8 @@ use (see SECURITY.md).
 
 Within a few seconds the two units pair over BLE. The key's LED lights up and the desk unit's log
 shows the key's interfaces being claimed (FIDO, CCID, OTP keyboard) and the BLE link coming up.
-Log messages are in Japanese.
+Log messages are in English. For Japanese, select it in `idf.py menuconfig` → KeyRelay log
+language before building (both projects).
 
 Then check, in this order:
 

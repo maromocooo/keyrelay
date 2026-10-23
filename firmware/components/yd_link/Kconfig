@@ -1,0 +1,17 @@
+menu "KeyRelay log language"
+
+    choice YD_LOG_LANG
+        prompt "Language of the serial log messages"
+        default YD_LOG_LANG_EN
+        help
+            Language of the log messages printed on the serial console (for example in screen).
+            Applies to both the receiver and the desk unit.
+
+        config YD_LOG_LANG_EN
+            bool "English"
+
+        config YD_LOG_LANG_JA
+            bool "Japanese (日本語)"
+    endchoice
+
+endmenu

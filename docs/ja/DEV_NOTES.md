@@ -4,6 +4,8 @@
 >（`desk_unit_v5_full.bin` など）、鍵のファイル名（`ydkey.bin`）、`--reader KeyRelay` などの手順は
 > 当時のものです。いまの作り方は [BUILD.md](BUILD.md) を見てください。
 > 各機能の設計（CCID・OTP・フィーチャーレポートの中継）と、期待されるログの例は今も参考になります。
+> ログの例は日本語の設定（`idf.py menuconfig` → KeyRelay log language → Japanese）のものです。
+> 既定のビルドでは、同じ内容が英語で出ます。
 
 
 ```

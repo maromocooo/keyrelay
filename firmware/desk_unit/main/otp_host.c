@@ -25,6 +25,7 @@
 #include "esp_timer.h"
 #include "yd_link.h"
 #include "otp_host.h"
+#include "yd_lang.h"
 
 static const char *TAG = "otp";
 
@@ -78,7 +79,7 @@ static void flush(void)
     }
     esp_err_t err = yd_link_send(YD_CH_OTP, s_batch, (uint16_t)(s_nrep * REPORT_LEN));
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "レシーバーへの送信失敗 (%s)。キー入力 %d 件を破棄", esp_err_to_name(err), s_nrep);
+        ESP_LOGW(TAG, YD_L("Send to the receiver failed (%s). Dropped %d key reports", "レシーバーへの送信失敗 (%s)。キー入力 %d 件を破棄"), esp_err_to_name(err), s_nrep);
     }
     s_nrep = 0;
 }
@@ -106,7 +107,7 @@ static void in_cb(usb_transfer_t *x)
             int64_t t = esp_timer_get_time();
             if (t - last_log > 2000000) {   /* 1回のタッチで1行だけ */
                 last_log = t;
-                ESP_LOGI(TAG, "YubiKeyがキー入力を開始（タッチ）→ Macへ中継");
+                ESP_LOGI(TAG, YD_L("Key started typing (touch) → relaying to the host", "YubiKeyがキー入力を開始（タッチ）→ Macへ中継"));
             }
         }
     } else if (x->status != USB_TRANSFER_STATUS_COMPLETED && x->status != USB_TRANSFER_STATUS_CANCELED &&
@@ -139,12 +140,12 @@ bool otph_attach(usb_host_client_handle_t client, usb_device_handle_t dev, const
         }
     }
     if (!ep_in || mps < REPORT_LEN || mps > 64) {
-        ESP_LOGW(TAG, "キーボードの interrupt IN が見つかりません");
+        ESP_LOGW(TAG, YD_L("Keyboard interrupt IN endpoint not found", "キーボードの interrupt IN が見つかりません"));
         return false;
     }
     esp_err_t err = usb_host_interface_claim(client, dev, itf->bInterfaceNumber, 0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "キーボードインターフェースの取得に失敗: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, YD_L("Failed to claim the keyboard interface: %s", "キーボードインターフェースの取得に失敗: %s"), esp_err_to_name(err));
         return false;
     }
     o.client = client;
@@ -162,10 +163,10 @@ bool otph_attach(usb_host_client_handle_t client, usb_device_handle_t dev, const
     o.in_flight = true;
     if (usb_host_transfer_submit(o.xin) != ESP_OK) {
         o.in_flight = false;
-        ESP_LOGW(TAG, "キーボードの読み取りを開始できませんでした");
+        ESP_LOGW(TAG, YD_L("Could not start reading the keyboard", "キーボードの読み取りを開始できませんでした"));
     }
     if (verbose) {
-        ESP_LOGI(TAG, "→ キーボード（OTP）を取得: itf%u EP IN=0x%02x MPS=%u", o.itf, ep_in, mps);
+        ESP_LOGI(TAG, YD_L("→ Claimed keyboard (OTP): itf%u EP IN=0x%02x MPS=%u", "→ キーボード（OTP）を取得: itf%u EP IN=0x%02x MPS=%u"), o.itf, ep_in, mps);
     }
     return true;
 }
@@ -229,7 +230,7 @@ static bool ctl_xfer(bool is_get, uint8_t *data)
         return false;
     }
     if (xSemaphoreTake(s_ctl_done, pdMS_TO_TICKS(CTL_TIMEOUT_MS + 200)) != pdTRUE) {
-        ESP_LOGW(TAG, "フィーチャーレポートの制御転送がタイムアウト");
+        ESP_LOGW(TAG, YD_L("Feature report control transfer timed out", "フィーチャーレポートの制御転送がタイムアウト"));
         return false;
     }
     if (s_xctl->status != USB_TRANSFER_STATUS_COMPLETED) {
@@ -255,7 +256,7 @@ static void ctl_task(void *arg)
         if (r.op == YD_OTPCTL_SET) {
             ok = ctl_xfer(false, r.d);
             if (!ok) {
-                ESP_LOGW(TAG, "SET_REPORT(Feature) 失敗");
+                ESP_LOGW(TAG, YD_L("SET_REPORT(Feature) failed", "SET_REPORT(Feature) 失敗"));
             }
         } else {
             uint8_t d[YD_OTPCTL_REPORT_LEN] = { 0 };
@@ -269,7 +270,7 @@ static void ctl_task(void *arg)
         int64_t t = esp_timer_get_time();
         if (t - last_log > 3000000) {   /* やり取りが続いている間は3秒に1行 */
             last_log = t;
-            ESP_LOGI(TAG, "フィーチャーレポート中継中（チャレンジレスポンス / スロット設定）累計 %" PRIu32 " 回", s_ctl_count);
+            ESP_LOGI(TAG, YD_L("Relaying feature reports (challenge-response / slot configuration), total %", "フィーチャーレポート中継中（チャレンジレスポンス / スロット設定）累計 %") PRIu32 YD_L("", " 回"), s_ctl_count);
         }
     }
 }
@@ -287,7 +288,7 @@ void otph_ctl_from_link(const uint8_t *data, uint16_t len)
         return;
     }
     if (xQueueSend(s_ctl_q, &r, pdMS_TO_TICKS(100)) != pdTRUE) {
-        ESP_LOGW(TAG, "フィーチャーレポートのキューが一杯");
+        ESP_LOGW(TAG, YD_L("Feature report queue full", "フィーチャーレポートのキューが一杯"));
     }
 }
 

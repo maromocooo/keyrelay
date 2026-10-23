@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "yd_link.h"
 #include "yd_frag.h"
+#include "yd_lang.h"
 
 static const char *TAG = "yd_frag";
 static SemaphoreHandle_t s_tx_mutex;
@@ -97,7 +98,7 @@ esp_err_t yd_frag_send(uint8_t ch, const uint8_t *msg, size_t len)
             }
         }
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "ch%u: %u/%u バイト目で送信失敗 (%s)", ch, (unsigned)off, (unsigned)len, esp_err_to_name(err));
+            ESP_LOGW(TAG, YD_L("ch%u: send failed at byte %u/%u (%s)", "ch%u: %u/%u バイト目で送信失敗 (%s)"), ch, (unsigned)off, (unsigned)len, esp_err_to_name(err));
             break;
         }
         off += n;

@@ -80,7 +80,7 @@ idf.py -C firmware/desk_unit set-target esp32s3 build merge-bin -o keyrelay_desk
 - ケースは USB-A キー用だけです。USB-C キー版と電池版の机上ユニットは今後。
 - 要求は同時に1つずつ（キー自体と同じ）。BLE が切れるとパソコンからはカードを抜いたように見え、
   PIN 入力済みの状態は消えます。
-- ファームのログは日本語です。
+- シリアルのログは、既定では英語です。`idf.py menuconfig` → KeyRelay log language で日本語にできます。
 - セキュアブート・フラッシュ暗号化・NVS 暗号化は、既定では設定していません。下書きの手順は
   [HARDENING.md](HARDENING.md) にあります（未検証）。
 
