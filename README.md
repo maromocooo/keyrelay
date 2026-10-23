@@ -95,8 +95,8 @@ docs/                   build guide (English / Japanese), images
   the smart card being removed, and PIN state is lost.
 - Serial log messages are in English by default. Japanese can be selected in `idf.py menuconfig` →
   KeyRelay log language.
-- Secure boot, flash encryption and NVS encryption are not set up by default. A draft guide is in
-  [docs/HARDENING.md](docs/HARDENING.md) (untested).
+- Secure boot, flash encryption and NVS encryption are not set up by default. The procedure in
+  [docs/HARDENING.md](docs/HARDENING.md) is verified on a computer, not yet on a unit.
 
 ## License
 

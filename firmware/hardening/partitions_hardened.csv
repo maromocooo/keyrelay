@@ -1,0 +1,11 @@
+# Partition table for hardened builds (secure boot v2 + flash encryption + NVS encryption).
+# The partition table moves to 0x10000 (CONFIG_PARTITION_TABLE_OFFSET) because the secure boot bootloader is
+# larger. ydkey stays at 0x190000. Flashing a hardened unit: docs/HARDENING.md.
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x11000,  0x6000
+phy_init, data, phy,      0x17000,  0x1000
+# NVS encryption keys. Leave erased: the firmware creates them on the first boot (flash encryption protects them)
+nvs_key,  data, nvs_keys, 0x18000,  0x1000,   encrypted
+factory,  app,  factory,  0x20000,  0x170000
+# Pre-shared key ("YDK1" + 32 bytes), flashed encrypted with the unit's flash encryption key
+ydkey,    data, 0x40,     0x190000, 0x1000,   encrypted

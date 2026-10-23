@@ -1,0 +1,29 @@
+# Hardened build: secure boot v2, flash encryption (release mode), secure ROM download mode, NVS encryption.
+# Added on top of the project's sdkconfig.defaults; see docs/HARDENING.md. Build (from the repository root):
+#   idf.py -C firmware/<project> -B firmware/<project>/build-hardened \
+#     -D SDKCONFIG=firmware/<project>/build-hardened/sdkconfig \
+#     -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;../hardening/sdkconfig.hardened" build
+# The eFuses are burned by hand beforehand (keys generated on your computer), not by the bootloader.
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../hardening/partitions_hardened.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x10000
+
+# Secure boot v2 (RSA-3072). Images are built unsigned and signed with espsecure.py (make_images.sh), so the
+# signing key never has to be in the build configuration.
+CONFIG_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_V2_ENABLED=y
+# CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES is not set
+
+# Flash encryption, release mode, AES-128-XTS (256-bit key in one eFuse key block)
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_AES128=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE=y
+CONFIG_SECURE_FLASH_CHECK_ENC_EN_IN_APP=y
+
+# UART/USB ROM download mode: secure mode (no flash readout, no RAM code; updates need pre-encrypted images)
+CONFIG_SECURE_ENABLE_SECURE_ROM_DL_MODE=y
+
+# NVS encryption with keys protected by flash encryption (BLE bonds, the receiver's saved desk unit)
+CONFIG_NVS_ENCRYPTION=y
+CONFIG_NVS_SEC_KEY_PROTECT_USING_FLASH_ENC=y
