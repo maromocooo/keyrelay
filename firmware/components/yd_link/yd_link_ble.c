@@ -37,6 +37,7 @@
 #include "esp_random.h"
 #include "esp_partition.h"
 #include "yd_sec.h"
+#include "yd_bond_policy.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "nimble/nimble_port.h"
@@ -54,6 +55,7 @@ void ble_store_config_init(void);
 #define BLE_PKT_MAX        244          /* 1(ch) + 243 */
 #define TXQ_DEPTH          48
 #define RXQ_DEPTH          48
+#define RXQ_EV_RESERVE     4            /* 受信データで埋めず、接続・切断の通知用に空けておく枠 */
 #define DEVICE_NAME        "KeyRelay"
 
 /* 128bit UUID（リトルエンディアン）: 7d1e0000-5c4a-4f6e-9b2d-59d0c0ffee01 系 */
@@ -97,12 +99,16 @@ static uint16_t s_svc_start, s_svc_end;
 static uint16_t s_peer_to_desk, s_peer_to_recv;
 static bool s_have_target;
 
-/* いま接続している相手（暗号化できた時点で記録）。PSK の相互認証に失敗した相手は、
- * 切断時に BLE のボンド情報も消す。鍵を持たない偽の機器に「登録済みの相手」や
- * 新規ペアリングの枠を取られたままにしないため */
+/* いま接続している相手（暗号化できた時点で記録）。PSK の相互認証に失敗した相手と、
+ * この接続で新しくペアリングしたのに認証まで進まなかった相手は、切断時に BLE のボンド情報も消す
+ * （yd_bond_policy.h）。鍵を持たない偽の機器に「登録済みの相手」や新規ペアリングの枠を
+ * 取られたままにしないため */
 static ble_addr_t s_peer_addr;
 static volatile bool s_peer_addr_valid;
-static volatile bool s_forget_on_disconnect;
+static volatile bool s_forget_on_disconnect;   /* 認証前の失敗で、こちらから切った */
+static volatile bool s_conn_was_bonded;        /* 接続した時点で、この相手のボンドがあった */
+static volatile bool s_conn_authed;            /* この接続で相互認証が通った */
+static volatile uint32_t s_ev_drops;           /* 受信キューに状態の通知を入れられなかった回数 */
 static ble_addr_t s_target;
 
 /* ======================================================================
@@ -321,10 +327,21 @@ static uint32_t s_tx_ctr, s_rx_ctr;
 static esp_timer_handle_t s_hs_timer;
 static uint32_t s_sec_fail;
 
+/* 接続・切断の通知。受信データと同じキューに入れて順番を保つ（切断より前のデータは、
+ * 切断の処理より先に読まれる）。push_rx は最後の RXQ_EV_RESERVE 枠を使わないので、相手が
+ * データを送りつけてキューを埋めても、通知は入る。どちらも NimBLE のホストタスクからしか
+ * 呼ばれないので、空きの確認と投入の間に割り込まれることはない */
 static void post_event(pk_kind_t kind)
 {
     pkt_t p = { .kind = kind, .len = 0 };
-    xQueueSend(s_rxq, &p, pdMS_TO_TICKS(100));
+    if (xQueueSend(s_rxq, &p, pdMS_TO_TICKS(100)) != pdTRUE) {
+        s_ev_drops++;
+        ESP_LOGE(TAG, "接続状態の通知をキューに入れられませんでした（%" PRIu32 "回目）→ 切断します", s_ev_drops);
+        uint16_t c = s_conn;
+        if (c != BLE_HS_CONN_HANDLE_NONE) {
+            ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM);
+        }
+    }
 }
 
 /* BLE層の「送受信できる / できない」。アプリへの通知はハンドシェイク完了後 */
@@ -422,6 +439,7 @@ static void hs_progress(void)
             return;
         }
         esp_timer_stop(s_hs_timer);
+        s_conn_authed = true;
         if (s_is_central && !s_have_target && s_peer_addr_valid) {
             target_save(&s_peer_addr);   /* 鍵の相互認証が通った相手だけを登録する */
             print_addr("この机上ユニットを登録しました:", &s_peer_addr);
@@ -552,7 +570,7 @@ static void push_rx(struct os_mbuf *om)
         return;
     }
     p.len = n;
-    if (xQueueSend(s_rxq, &p, 0) != pdTRUE) {
+    if (uxQueueSpacesAvailable(s_rxq) <= RXQ_EV_RESERVE || xQueueSend(s_rxq, &p, 0) != pdTRUE) {
         g_ydl_stats.rx_overflows++;
     }
 }
@@ -767,14 +785,52 @@ static void periph_advertise(void)
     }
 }
 
+/* 接続した直後に呼ぶ。この接続の前からボンドがあった相手かを覚えておく */
+static void conn_begin(uint16_t conn)
+{
+    struct ble_gap_conn_desc desc;
+    s_forget_on_disconnect = false;
+    s_conn_authed = false;
+    s_peer_addr_valid = false;
+    s_conn_was_bonded = ble_gap_conn_find(conn, &desc) == 0 && peer_is_bonded(&desc.peer_id_addr);
+}
+
 static void forget_failed_peer(void)
 {
-    if (s_forget_on_disconnect && s_peer_addr_valid) {
+    yd_bond_conn_t c = {
+        .peer_known = s_peer_addr_valid,
+        .bonded_before_conn = s_conn_was_bonded,
+        .authed = s_conn_authed,
+        .hs_failed = s_forget_on_disconnect,
+    };
+    if (yd_bond_forget_on_disconnect(&c)) {
         ble_store_util_delete_peer(&s_peer_addr);
-        print_addr("鍵の相互認証に失敗した相手のペアリング情報を消しました:", &s_peer_addr);
+        print_addr(c.hs_failed ? "鍵の相互認証に失敗した相手のペアリング情報を消しました:"
+                               : "ペアリングだけして認証前に切れた相手のペアリング情報を消しました:",
+                   &s_peer_addr);
     }
     s_forget_on_disconnect = false;
+    s_conn_authed = false;
+    s_conn_was_bonded = false;
     s_peer_addr_valid = false;
+}
+
+/* ボンドの保存先がいっぱいのとき。NimBLE 標準の ble_store_util_status_rr は一番古い相手を
+ * 消して場所を空けるが、それだと受付時間中にペアリングを繰り返すだけで、正規の相手を
+ * 追い出せてしまう。ここでは古い相手を消さず、新しい保存のほうを失敗させる */
+static int store_status_cb(struct ble_store_status_event *event, void *arg)
+{
+    switch (event->event_code) {
+    case BLE_STORE_EVENT_OVERFLOW:
+        ESP_LOGW(TAG, "ペアリング情報の保存先がいっぱいです（obj_type=%d）。古い相手は消さず、今回の保存をあきらめます。"
+                      "相手を入れ替えるときは BOOT を3秒押してペアリング情報を消してください",
+                 event->overflow.obj_type);
+        return BLE_HS_ESTORE_CAP;
+    case BLE_STORE_EVENT_FULL:
+        return 0;
+    default:
+        return BLE_HS_EUNKNOWN;
+    }
 }
 
 static int gap_event_periph(struct ble_gap_event *event, void *arg)
@@ -787,6 +843,7 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
             return 0;
         }
         s_conn = event->connect.conn_handle;
+        conn_begin(s_conn);
         s_encrypted = false;
         s_subscribed = false;
         cp_reset(false);
@@ -880,6 +937,7 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
         if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
             ble_store_util_delete_peer(&desc.peer_id_addr);
         }
+        s_conn_was_bonded = false;   /* 古いボンドを消して、この接続で作り直す */
         return BLE_GAP_REPEAT_PAIRING_RETRY;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -1025,6 +1083,7 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
             return 0;
         }
         s_conn = event->connect.conn_handle;
+        conn_begin(s_conn);
         s_encrypted = false;
         s_svc_start = s_svc_end = s_peer_to_desk = s_peer_to_recv = 0;
         ble_gattc_exchange_mtu(s_conn, on_mtu, NULL);
@@ -1100,6 +1159,7 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
         if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
             ble_store_util_delete_peer(&desc.peer_id_addr);
         }
+        s_conn_was_bonded = false;
         return BLE_GAP_REPEAT_PAIRING_RETRY;
     }
     return 0;
@@ -1173,7 +1233,7 @@ esp_err_t ydl_ble_init(const yd_link_config_t *cfg)
 
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
-    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+    ble_hs_cfg.store_status_cb = store_status_cb;
     ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
     ble_hs_cfg.sm_bonding = 1;
     ble_hs_cfg.sm_mitm = 0;

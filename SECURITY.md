@@ -34,9 +34,11 @@ Two independent layers:
 1. **BLE LE Secure Connections** (ECDH, "Just Works", bonded). The desk unit only accepts a *new*
    bond while it has no bond yet or during the first 120 s after boot. Just Works cannot stop a
    man-in-the-middle during that pairing moment, which is why layer 2 exists. The receiver only
-   remembers a desk unit after the layer-2 handshake succeeds, and both units delete the BLE bond of
-   any peer that fails or does not finish that handshake. A device without the PSK therefore cannot
-   make the receiver stick to it, or keep the desk unit's bond for itself.
+   remembers a desk unit after the layer-2 handshake succeeds. Both units delete the BLE bond of any
+   peer that fails or times out in that handshake, and of any peer that paired during this connection
+   but disconnected (by itself, too) before completing it. When the bond store is full, no existing
+   bond is evicted to make room. A device without the PSK therefore cannot make the receiver stick to
+   it, keep the desk unit's bond for itself, or push the legitimate peer out.
 2. **Application layer with a pre-shared key (PSK)**, implemented in
    [`firmware/components/yd_link/yd_sec.c`](firmware/components/yd_link/yd_sec.c):
    - The same random 256-bit key is flashed into both units (`YDK1` + 32 bytes at `0x190000`,

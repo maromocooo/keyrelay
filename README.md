@@ -85,7 +85,9 @@ docs/                   build guide (English / Japanese), images
 ## Limitations and roadmap
 
 - USB IDs: the default build uses the pid.codes **test** PID `0x1209:0x0001`, which is not unique.
-  A dedicated PID will be requested from pid.codes now that the project is public.
+  pid.codes does not allow devices with test PIDs to be redistributed, so no prebuilt firmware is
+  published until KeyRelay has its own PID: build it yourself for your own use. A dedicated PID will be
+  requested from pid.codes now that the project is public.
 - Only the USB-A key variant has a case. A USB-C key variant and a battery-powered desk unit are planned.
 - One request at a time per interface (same as the key itself). If the BLE link drops, the computer sees
   the smart card being removed, and PIN state is lost.
