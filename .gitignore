@@ -16,6 +16,11 @@ ydkey.bin
 firmware/tests/host/test_frag
 firmware/tests/host/test_sec
 firmware/tests/host/test_bond_policy
+firmware/tests/host/test_otp_batch
+firmware/tests/fuzz/fuzz_link_rx
+firmware/tests/fuzz/fuzz_frag
+firmware/tests/fuzz/corpus/
+firmware/tests/fuzz/crash-*
 __pycache__/
 *.pyc
 .DS_Store
