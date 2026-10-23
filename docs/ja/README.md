@@ -19,7 +19,7 @@
 |---|---|---|
 | FIDO2 / U2F（パスキー、WebAuthn） | 64バイトの CTAPHID レポート | 使える: webauthn.io で登録・認証（Chrome） |
 | OpenPGP（GnuPG） | CCID（スマートカード）のメッセージ | 使える: `gpg --card-status` |
-| タッチで打たれる OTP | キーボードのレポート（押す〜離すをまとめて送る） | 使える: demo.yubico.com で Yubico OTP が有効と判定 |
+| タッチで打たれる OTP | キーボードのレポート（タッチ1回分を決まった並びで送る。既定は Yubico OTP のキーだけ） | 使える: demo.yubico.com で Yubico OTP が有効と判定 |
 | PIV・OATH | CCID（スマートカード）のメッセージ | 中継はする。下の Yubico のツールの注意を参照 |
 | OTP のチャレンジレスポンス・スロット設定 | HID のフィーチャーレポートを1回ずつ往復 | 中継はする。下の Yubico のツールの注意を参照 |
 
@@ -51,8 +51,8 @@ pid.codes で専用の USB ID が取れたら、各ツールに対応しても�
   3つのインターフェースを掴んで、中身を解釈せずに中継します（FIDO のチャンネル ID だけは、キーが
   再列挙されても切れないように仮想化しています）。
 - **レシーバー**（ネイティブ USB を持つ ESP32-S3 ボード）は、パソコンから同じ3つに見えます。
-- BLE は LE Secure Connections に加えて、事前共有鍵による AES-256-GCM で守っています。
-  何が守れて何が守れないかは [SECURITY.md](SECURITY.md) を読んでください。
+- BLE は LE Secure Connections に加えて、事前共有鍵・使い捨ての X25519（前方秘匿性）・AES-256-GCM の
+  アプリ層で守っています。何が守れて何が守れないかは [SECURITY.md](SECURITY.md) を読んでください。
 - どちらも USB 給電です。机上ユニットは、背面に口を出した CP2102N（USB-UART 変換）の USB-C から
   電源とログを取ります。
 

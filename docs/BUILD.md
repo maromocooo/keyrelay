@@ -215,8 +215,19 @@ Assembly order (looking into the open body from below):
   run `gpgconf --kill scdaemon` and try again.
 - For GnuPG, `~/.gnupg/scdaemon.conf` with `disable-ccid` and `pcsc-shared` makes gpg use the macOS
   smart-card service and share the card with other tools.
+- **The receiver only types Yubico OTPs by default** (ModHex letters and Enter). If a slot types a
+  static password, OATH-HOTP digits or uses the Tab options, build the receiver with
+  menuconfig → KeyRelay → "Keys the OTP keyboard may type" → "Any key". Blocked keys are logged. See
+  SECURITY.md for why.
+- **Turn off NFC on the key if you do not use it.** A key left on the desk answers any phone held
+  against it. Plug the key directly into a computer and run `ykman config nfc --disable-all`.
 
 ## 9. Updating the desk unit
+
+**Update both units together, the desk unit first.** The two units must speak the same link protocol
+version. A desk unit that meets another version logs it; an older desk unit cannot tell, so the receiver
+only logs a hint ("The desk unit refused our HELLO"). After both are updated they pair again by
+themselves if needed.
 
 Flash only the app at `0x10000`. The key at `0x190000` and the BLE pairing stay.
 
