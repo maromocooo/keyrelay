@@ -538,12 +538,12 @@ static void relay_key_to_mac(const uint8_t *in)
         return;
     }
     if (init && cmd != CTAPHID_KEEPALIVE) {
-        ESP_LOGI(TAG, "Key→Mac devCID=%08" PRIx32 "→vCID=%08" PRIx32 " CMD=0x%02x len=%u%s",
+        ESP_LOGI(TAG, YD_L("Key→host devCID=%08", "Key→Mac devCID=%08") PRIx32 "→vCID=%08" PRIx32 " CMD=0x%02x len=%u%s",
                  dcid, vcid, cmd, bcnt, final ? YD_L(" (done)", "（完了）") : "");
     } else if (log_ka) {
-        ESP_LOGI(TAG, "Key→Mac vCID=%08" PRIx32 YD_L(" KEEPALIVE status=%u (waiting for touch etc.; the bus stays up)", " KEEPALIVE status=%u（タッチ待ちなど。バスは止めません）"), vcid, r[7]);
+        ESP_LOGI(TAG, YD_L("Key→host vCID=%08", "Key→Mac vCID=%08") PRIx32 YD_L(" KEEPALIVE status=%u (waiting for touch etc.; the bus stays up)", " KEEPALIVE status=%u（タッチ待ちなど。バスは止めません）"), vcid, r[7]);
     } else if (final) {
-        ESP_LOGI(TAG, "Key→Mac vCID=%08" PRIx32 YD_L(" response sent", " 応答の送信完了"), vcid);
+        ESP_LOGI(TAG, YD_L("Key→host vCID=%08", "Key→Mac vCID=%08") PRIx32 YD_L(" response sent", " 応答の送信完了"), vcid);
     }
     if (invalidated) {
         ESP_LOGW(TAG, YD_L("Key reported an invalid CID. Device CID for vCID=%08", "YubiKeyがCIDを無効と応答。vCID=%08") PRIx32 YD_L(" will be re-acquired next time", " のデバイスCIDを次回取り直します"), vcid);
@@ -734,7 +734,7 @@ static void handle_mac_packet(uint8_t *pkt)
     uint16_t bcnt = (pkt[5] << 8) | pkt[6];
 
     if (init) {
-        ESP_LOGI(TAG, "Mac→Key vCID=%08" PRIx32 " CMD=0x%02x len=%u%s", cid, cmd, bcnt,
+        ESP_LOGI(TAG, YD_L("Host→key vCID=%08", "Mac→Key vCID=%08") PRIx32 " CMD=0x%02x len=%u%s", cid, cmd, bcnt,
                  is_ready() ? "" : YD_L(" (bus suspended)", "（バス停止中）"));
     }
     if (cid == 0) {
