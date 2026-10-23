@@ -1,0 +1,60 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mbedtls
+        run: sudo apt-get update && sudo apt-get install -y libmbedtls-dev
+      - name: Host unit tests (fragmentation, link security)
+        run: make -C firmware/tests/host
+
+  firmware:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.4.4
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: receiver
+            variant: default
+          - project: desk_unit
+            variant: default
+          # Compile checks of the build options
+          - project: desk_unit
+            variant: uart-download
+          - project: receiver
+            variant: no-keyboard
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: bash
+        run: |
+          git config --global --add safe.directory '*'
+          . "$IDF_PATH/export.sh"
+          cd "firmware/${{ matrix.project }}"
+          if [ "${{ matrix.variant }}" = "uart-download" ]; then
+            sed -i 's/^#define YD_UART_DOWNLOAD_CMD 0/#define YD_UART_DOWNLOAD_CMD 1/' main/main.c
+            grep -q '^#define YD_UART_DOWNLOAD_CMD 1' main/main.c
+          fi
+          if [ "${{ matrix.variant }}" = "no-keyboard" ]; then
+            echo "CONFIG_YD_OTP_KEYBOARD=n" >> sdkconfig.defaults
+          fi
+          idf.py set-target esp32s3
+          idf.py build merge-bin -o "keyrelay_${{ matrix.project }}_full.bin"
+      - name: Upload merged binary
+        if: matrix.variant == 'default'
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyrelay_${{ matrix.project }}
+          path: firmware/${{ matrix.project }}/build/keyrelay_${{ matrix.project }}_full.bin
+          if-no-files-found: error

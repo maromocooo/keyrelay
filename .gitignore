@@ -1,0 +1,20 @@
+# ESP-IDF
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# Pre-shared pairing keys: NEVER commit
+*.key
+*key*.bin
+ydkey.bin
+# Secure boot signing keys (docs/HARDENING.md)
+*.pem
+
+# Host tests / Python
+firmware/tests/host/test_frag
+firmware/tests/host/test_sec
+__pycache__/
+*.pyc
+.DS_Store

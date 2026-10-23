@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 520" role="img" aria-label="KeyRelay desk unit wiring (USB-A key, USB powered)"><style>
+  .band{fill:#1d2124}.blk{fill:#fff;stroke:#1d2124;stroke-width:1.4}.blk.opt{stroke:#8b8f8a;stroke-dasharray:5 4}
+  .dot{stroke:none}.dot.gnd{fill:#2a2e31}.dot.v5{fill:#c62f2f}
+  .w{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+  .v5{stroke:#c62f2f}.gnd{stroke:#2a2e31}.dp{stroke:#2e8b57}.dm{stroke:#8a96a3}.tx{stroke:#2f6fd1}.rx{stroke:#8a4fd1}
+  .key{fill:#1d2124}.part{fill:#fff;stroke:#1d2124;stroke-width:1.3}
+  text{font-family:"Hiragino Sans","Noto Sans JP","Noto Sans CJK JP",system-ui,sans-serif;fill:#1d2124}
+  .lbl{font-size:13px;font-weight:700}.sub{font-size:11.5px;fill:#5f6669}
+  .mono,.pin{font-family:ui-monospace,Menlo,"DejaVu Sans Mono",monospace}.mono{font-size:12px}.pin{font-size:11.5px}
+</style><rect width="100%" height="100%" fill="#f6f6f3"/>
+          <defs>
+            <g id="g">
+              <path d="M-12 0 H12 M-8 5 H8 M-4 10 H4" style="stroke:#2a2e31;stroke-width:2.4;fill:none;stroke-linecap:round"/>
+            </g>
+          </defs>
+
+          
+          <rect class="blk opt" x="24" y="78" width="150" height="112" rx="8"/>
+          <text class="lbl" x="38" y="104">USB charger / computer</text>
+          <text class="sub" x="38" y="122">charger: power only</text>
+          <text class="sub" x="38" y="140">computer: power + log</text>
+          <text class="sub" x="38" y="170">USB-C cable</text>
+          <path d="M174 134 H214" style="stroke:#1d2124;stroke-width:7;stroke-linecap:round"/>
+
+          
+          <rect class="blk" x="214" y="60" width="200" height="190" rx="8"/>
+          <text class="lbl" x="228" y="86">USB-UART module</text>
+          <text class="sub" x="228" y="102">CP2102N (USB-C at the rear)</text>
+          <rect class="part" x="214" y="120" width="26" height="30" rx="6"/>
+          <text class="pin" x="344" y="140">5V ▶</text>
+          <text class="pin" x="336" y="180">GND ▶</text>
+          <text class="pin" x="336" y="212">TXD ▶</text>
+          <text class="pin" x="336" y="236">RXD ▶</text>
+
+          
+          <path class="w v5" d="M414 136 H470"/>
+          <polygon class="part" points="470,122 470,150 494,136"/>
+          <rect class="band" x="494" y="122" width="5" height="28"/>
+          <text class="mono" x="420" y="112">D1 diode 1N5819</text>
+          <text class="sub" x="440" y="170">band = XIAO side</text>
+          <path class="w v5" d="M499 136 H870"/>
+          <circle class="dot v5" cx="780" cy="136" r="4"/>
+
+          
+          <path class="w gnd" d="M414 176 H870"/>
+          <circle class="dot gnd" cx="780" cy="176" r="4"/>
+
+          
+          <path class="w v5" d="M780 136 V148"/>
+          <rect class="part" x="764" y="148" width="32" height="7" rx="2"/>
+          <rect class="part" x="764" y="159" width="32" height="7" rx="2"/>
+          <path class="w gnd" d="M780 166 V176"/>
+          <text class="pin" x="800" y="156" style="font-size:10px">＋</text>
+          <text class="mono" x="560" y="204">C2 470 µF (soldered to the XIAO pads)</text>
+
+          
+          <path class="w tx" d="M414 208 H560 V262 H870"/>
+          <path class="w rx" d="M414 232 H540 V286 H870"/>
+
+          
+          <rect class="blk" x="870" y="64" width="166" height="250" rx="10"/>
+          <text class="lbl" x="884" y="90">XIAO ESP32S3</text>
+          <text class="sub" x="884" y="106">only used pins shown</text>
+          <text class="pin" x="878" y="140">◀ 5V (back: VUSB)</text>
+          <text class="pin" x="878" y="180">◀ GND</text>
+          <text class="pin" x="878" y="266">◀ D7 GPIO44 RX</text>
+          <text class="pin" x="878" y="290">◀ D6 GPIO43 TX</text>
+          <text class="pin" x="960" y="222" style="fill:#5f6669">U.FL ▶</text>
+          <path d="M1036 218 H1050 V40 H900" style="stroke:#5f6669;stroke-width:2;fill:none"/>
+          <rect class="part" x="760" y="28" width="140" height="24" rx="4"/>
+          <text class="sub" x="772" y="45">antenna (side wall)</text>
+          <rect class="part" x="923" y="304" width="60" height="22" rx="7"/>
+          <text class="sub" x="934" y="319">USB-C</text>
+
+          
+          <path d="M953 326 V350" style="stroke:#1d2124;stroke-width:7;stroke-linecap:round"/>
+          <rect class="blk" x="870" y="350" width="166" height="150" rx="8"/>
+          <text class="lbl" x="884" y="374">USB-C plug breakout</text>
+          <text class="sub" x="884" y="390">(plugs into the XIAO)</text>
+          <text class="pin" x="878" y="412">◀ VBUS</text>
+          <text class="pin" x="878" y="434">◀ GND</text>
+          <text class="pin" x="878" y="456">◀ D+</text>
+          <text class="pin" x="878" y="478">◀ D-</text>
+          <text class="pin" x="960" y="478" style="fill:#5f6669">CC1 n.c.</text>
+
+          
+          <rect class="blk" x="560" y="352" width="160" height="148" rx="8"/>
+          <text class="lbl" x="574" y="375">USB-A receptacle breakout</text>
+          <text class="sub" x="574" y="391">(hot-glued in place)</text>
+          <text class="pin" x="650" y="412">VBUS ▶</text>
+          <text class="pin" x="664" y="434">GND ▶</text>
+          <text class="pin" x="672" y="456">D+ ▶</text>
+          <text class="pin" x="672" y="478">D- ▶</text>
+          <path class="w v5" d="M720 408 H870"/>
+          <path class="w gnd" d="M720 430 H870"/>
+          <path class="w dp" d="M720 452 H870"/>
+          <path class="w dm" d="M720 474 H870"/>
+
+          
+          <rect class="part" x="440" y="402" width="120" height="70" rx="3"/>
+          <text class="sub" x="452" y="442">receptacle</text>
+          <rect class="key" x="300" y="396" width="146" height="82" rx="9"/>
+          <circle cx="342" cy="437" r="15" style="fill:#c9a227"/>
+          <circle cx="314" cy="437" r="5.5" style="fill:#ffffff"/>
+          <text class="lbl" x="372" y="432" style="fill:#f6f6f3;font-size:12px">security key</text>
+          <text x="372" y="449" style="fill:#f6f6f3;font-size:11px">USB-A</text>
+          <text class="sub" x="300" y="498">inserted through the left side slot</text>
+
+          <text class="sub" x="24" y="300">Key VBUS comes from the XIAO 5V</text>
+          <text class="sub" x="24" y="318">via the XIAO USB-C and the plug breakout</text>
+        </svg>
