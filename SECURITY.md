@@ -47,8 +47,10 @@ Two independent layers:
      HKDF-SHA256 (salt = both nonces): one key per direction plus an authentication key.
    - Mutual authentication: each side sends `HMAC-SHA256(k_auth, "YD-AUTH" ‖ role ‖ nonces)` (truncated
      to 16 bytes) and checks the peer's value in constant time. A wrong value disconnects, and so does a
-     handshake that is not finished 5 s after the encrypted BLE link is up. (A peer that connects but
-     never completes BLE encryption can still occupy the single connection slot: denial of service.)
+     handshake that is not finished 5 s after the encrypted BLE link is up. A connection that has not
+     completed the handshake 15 s after it was opened (for example a peer that never encrypts or never
+     subscribes) is closed too. A peer that keeps reconnecting can still hold the single connection
+     slot most of the time: denial of service, like radio jamming.
    - Data: AES-256-GCM per packet, the 5-byte header (type + 32-bit counter) is authenticated as AAD,
      the counter forms the IV. Counters must strictly increase (replay protection); the link is
      dropped before the counter could wrap.

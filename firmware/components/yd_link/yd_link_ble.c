@@ -66,7 +66,8 @@ static const ble_uuid128_t UUID_SVC     = YD_UUID(0x00);
 static const ble_uuid128_t UUID_TO_DESK = YD_UUID(0x01);
 static const ble_uuid128_t UUID_TO_RECV = YD_UUID(0x02);
 
-#define HS_TIMEOUT_MS      5000          /* この時間内に相互認証が終わらなければ切断 */
+#define HS_TIMEOUT_MS      5000          /* 暗号化・購読の後、この時間内に相互認証が終わらなければ切断 */
+#define CONN_AUTH_TIMEOUT_MS 15000       /* 接続してから、この時間内に相互認証まで終わらなければ切断 */
 #define KEY_PARTITION      "ydkey"       /* 鍵を書き込むパーティション（partitions.csv） */
 
 typedef enum {
@@ -110,6 +111,7 @@ static volatile bool s_forget_on_disconnect;   /* 認証前の失敗で、こち
 static volatile bool s_conn_was_bonded;        /* 接続した時点で、この相手のボンドがあった */
 static volatile bool s_conn_authed;            /* この接続で相互認証が通った */
 static volatile uint32_t s_ev_drops;           /* 受信キューに状態の通知を入れられなかった回数 */
+static uint32_t s_bond_delete_fail;            /* 消すべきボンドを消せなかった回数 */
 static ble_addr_t s_target;
 
 /* ======================================================================
@@ -326,6 +328,7 @@ static uint8_t s_peer_mac[YD_SEC_MAC_LEN];
 static bool s_hs_hello_sent, s_hs_peer_hello, s_hs_keys, s_hs_auth_sent, s_hs_peer_auth;
 static uint32_t s_tx_ctr, s_rx_ctr;
 static esp_timer_handle_t s_hs_timer;
+static esp_timer_handle_t s_conn_timer;
 static uint32_t s_sec_fail;
 
 /* 接続・切断の通知。受信データと同じキューに入れて順番を保つ（切断より前のデータは、
@@ -383,6 +386,19 @@ static void hs_timeout_cb(void *arg)
     }
 }
 
+/* 接続してから相互認証が終わるまでの上限。s_hs_timer は暗号化と購読が済んでから動くので、
+ * 暗号化や購読をしないまま接続だけを続ける相手（1つしかない接続枠の占有）はこちらで切る。
+ * 失敗の印は付けない（前からのボンドは残し、この接続で作られたボンドは yd_bond_policy で消える） */
+static void conn_timeout_cb(void *arg)
+{
+    uint16_t c = s_conn;
+    if (c != BLE_HS_CONN_HANDLE_NONE && !s_conn_authed) {
+        ESP_LOGW(TAG, YD_L("Not authenticated within %d s of connecting → disconnecting",
+                           "接続から %d 秒以内に相互認証が終わりませんでした → 切断します"), CONN_AUTH_TIMEOUT_MS / 1000);
+        ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM);
+    }
+}
+
 static void hs_reset(void)
 {
     xSemaphoreTake(s_sec_mutex, portMAX_DELAY);
@@ -425,21 +441,29 @@ static void hs_progress(void)
     }
     if (s_hs_keys && !s_hs_auth_sent) {
         uint8_t m[1 + YD_SEC_MAC_LEN] = { YD_SEC_T_AUTH };
-        yd_sec_auth_mac(&s_keys, my_role(), nonce_c(), nonce_p(), &m[1]);
+        if (yd_sec_auth_mac(&s_keys, my_role(), nonce_c(), nonce_p(), &m[1]) != 0) {
+            hs_disconnect(YD_L("Computing the AUTH MAC failed", "AUTH の MAC の計算に失敗"));
+            return;
+        }
         send_raw(m, sizeof(m));
         s_hs_auth_sent = true;
     }
     if (s_hs_keys && s_hs_auth_sent && s_hs_peer_auth) {
         uint8_t expect[YD_SEC_MAC_LEN];
-        yd_sec_auth_mac(&s_keys, peer_role(), nonce_c(), nonce_p(), expect);
-        bool ok = yd_sec_equal(expect, s_peer_mac, YD_SEC_MAC_LEN);
+        int rc = yd_sec_auth_mac(&s_keys, peer_role(), nonce_c(), nonce_p(), expect);
+        bool ok = rc == 0 && yd_sec_equal(expect, s_peer_mac, YD_SEC_MAC_LEN);
         yd_sec_wipe(expect, sizeof(expect));
+        if (rc != 0) {
+            hs_disconnect(YD_L("Computing the AUTH MAC failed", "AUTH の MAC の計算に失敗"));
+            return;
+        }
         if (!ok) {
             s_sec_fail++;
             hs_disconnect(YD_L("Peer key does not match. Flash the same key file to both units", "相手の鍵が一致しません。2台に同じ鍵ファイルを書き込んでください"));
             return;
         }
         esp_timer_stop(s_hs_timer);
+        esp_timer_stop(s_conn_timer);
         s_conn_authed = true;
         if (s_is_central && !s_have_target && s_peer_addr_valid) {
             target_save(&s_peer_addr);   /* 鍵の相互認証が通った相手だけを登録する */
@@ -794,6 +818,8 @@ static void conn_begin(uint16_t conn)
     s_conn_authed = false;
     s_peer_addr_valid = false;
     s_conn_was_bonded = ble_gap_conn_find(conn, &desc) == 0 && peer_is_bonded(&desc.peer_id_addr);
+    esp_timer_stop(s_conn_timer);
+    esp_timer_start_once(s_conn_timer, (uint64_t)CONN_AUTH_TIMEOUT_MS * 1000);
 }
 
 static void forget_failed_peer(void)
@@ -804,11 +830,20 @@ static void forget_failed_peer(void)
         .authed = s_conn_authed,
         .hs_failed = s_forget_on_disconnect,
     };
+    esp_timer_stop(s_conn_timer);
     if (yd_bond_forget_on_disconnect(&c)) {
-        ble_store_util_delete_peer(&s_peer_addr);
-        print_addr(c.hs_failed ? YD_L("Deleted the bond of a peer that failed key authentication:", "鍵の相互認証に失敗した相手のペアリング情報を消しました:")
-                               : YD_L("Deleted the bond of a peer that paired but disconnected before authenticating:", "ペアリングだけして認証前に切れた相手のペアリング情報を消しました:"),
-                   &s_peer_addr);
+        int rc = ble_store_util_delete_peer(&s_peer_addr);
+        if (rc != 0 && rc != BLE_HS_ENOENT) {
+            s_bond_delete_fail++;
+            ESP_LOGE(TAG, YD_L("Could not delete the peer's bond rc=%d (%" PRIu32 " times). Hold BOOT for 3 s to erase all pairing data",
+                               "相手のペアリング情報を消せませんでした rc=%d（%" PRIu32 "回目）。BOOT を3秒押すと全部消せます"),
+                     rc, s_bond_delete_fail);
+            print_addr(YD_L("Peer:", "相手:"), &s_peer_addr);
+        } else {
+            print_addr(c.hs_failed ? YD_L("Deleted the bond of a peer that failed key authentication:", "鍵の相互認証に失敗した相手のペアリング情報を消しました:")
+                                   : YD_L("Deleted the bond of a peer that paired but disconnected before authenticating:", "ペアリングだけして認証前に切れた相手のペアリング情報を消しました:"),
+                       &s_peer_addr);
+        }
     }
     s_forget_on_disconnect = false;
     s_conn_authed = false;
@@ -1212,6 +1247,8 @@ esp_err_t ydl_ble_init(const yd_link_config_t *cfg)
     ESP_RETURN_ON_FALSE(s_sec_mutex, ESP_ERR_NO_MEM, TAG, "mutex");
     const esp_timer_create_args_t ta = { .callback = hs_timeout_cb, .name = "yd_hs" };
     ESP_RETURN_ON_ERROR(esp_timer_create(&ta, &s_hs_timer), TAG, "timer");
+    const esp_timer_create_args_t tc = { .callback = conn_timeout_cb, .name = "yd_conn" };
+    ESP_RETURN_ON_ERROR(esp_timer_create(&tc, &s_conn_timer), TAG, "timer");
     s_have_psk = load_psk();
 
     s_txq = xQueueCreate(TXQ_DEPTH, sizeof(pkt_t));

@@ -79,13 +79,17 @@ int yd_sec_derive(const uint8_t psk[YD_SEC_KEY_LEN], const uint8_t nc[YD_SEC_NON
 int yd_sec_auth_mac(const yd_sec_keys_t *k, uint8_t role, const uint8_t nc[YD_SEC_NONCE_LEN],
                     const uint8_t np[YD_SEC_NONCE_LEN], uint8_t mac_out[YD_SEC_MAC_LEN])
 {
-    uint8_t msg[8 + 2 * YD_SEC_NONCE_LEN], full[32];
+    uint8_t msg[8 + 2 * YD_SEC_NONCE_LEN], full[32] = { 0 };
     memcpy(msg, "YD-AUTH", 7);
     msg[7] = role;
     memcpy(msg + 8, nc, YD_SEC_NONCE_LEN);
     memcpy(msg + 8 + YD_SEC_NONCE_LEN, np, YD_SEC_NONCE_LEN);
     int rc = hmac256(k->k_auth, YD_SEC_KEY_LEN, msg, sizeof(msg), full);
-    memcpy(mac_out, full, YD_SEC_MAC_LEN);
+    if (rc == 0) {
+        memcpy(mac_out, full, YD_SEC_MAC_LEN);
+    } else {
+        memset(mac_out, 0, YD_SEC_MAC_LEN);   /* 失敗時に未初期化のスタックを出さない */
+    }
     yd_sec_wipe(full, sizeof(full));
     return rc;
 }
