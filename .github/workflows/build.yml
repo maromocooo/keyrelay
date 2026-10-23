@@ -47,6 +47,10 @@ jobs:
             variant: log-ja
           - project: receiver
             variant: log-ja
+          - project: desk_unit
+            variant: hardened
+          - project: receiver
+            variant: hardened
     # Compile check only. No firmware is published: the default build uses the pid.codes test PID
     # 0x1209:0x0001, which must not be distributed. Build from source (docs/BUILD.md).
     steps:
@@ -66,6 +70,9 @@ jobs:
           fi
           if [ "${{ matrix.variant }}" = "log-ja" ]; then
             echo "CONFIG_YD_LOG_LANG_JA=y" >> sdkconfig.defaults
+          fi
+          if [ "${{ matrix.variant }}" = "hardened" ]; then
+            cat ../hardening/sdkconfig.hardened >> sdkconfig.defaults   # docs/HARDENING.md
           fi
           idf.py set-target esp32s3
           idf.py build merge-bin -o "keyrelay_${{ matrix.project }}_full.bin"

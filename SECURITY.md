@@ -97,7 +97,7 @@ Flash readout also gives the BLE bonds (LTKs), so the BLE encryption does not he
 - **You may not notice.** A stolen key is missed quickly, a silently copied PSK is not. If you suspect a
   leak, generate a new key file, flash it to both units and erase the BLE bonds.
 
-The real fix is to keep the PSK from being read: see [docs/HARDENING.md](docs/HARDENING.md) (draft).
+The real fix is to keep the PSK from being read: see [docs/HARDENING.md](docs/HARDENING.md).
 The desk unit sits on the desk, so harden it first.
 
 ## What KeyRelay does *not* protect against
@@ -122,18 +122,19 @@ The desk unit sits on the desk, so harden it first.
   a key; OpenPGP: `ykman openpgp keys set-touch`).
 - **Physical access to either unit.** Flash encryption and secure boot are **not** enabled by default,
   so anyone holding a unit for a few minutes can read the PSK and the BLE bond, then pose as either unit
-  (see "If the PSK leaks"). Keep the desk unit where you would keep the key itself. Hardening is possible but not yet documented
-  step by step: the `ydkey` partition is already marked `encrypted` in `partitions.csv`, so it is
-  encrypted once ESP32-S3 flash encryption is enabled (the key file then has to be flashed with
-  encryption); the BLE bonds in `nvs` additionally need NVS encryption; secure boot is needed to stop
-  modified firmware. The easy update paths described in docs/BUILD.md no longer work after that.
-  A draft guide (untested, eFuse changes are irreversible) is in [docs/HARDENING.md](docs/HARDENING.md).
+  (see "If the PSK leaks"). Keep the desk unit where you would keep the key itself.
+  [docs/HARDENING.md](docs/HARDENING.md) turns on flash encryption (release mode), secure boot v2, NVS
+  encryption and secure download mode, with a configuration that builds for both units and a script for
+  signing and encrypting. It has been verified on a computer but not yet on a unit, and every eFuse step
+  is irreversible: try it on a spare board first.
 - **The desk unit's serial console, if you enable updates over it.** With `YD_UART_DOWNLOAD_CMD 1`
   in `firmware/desk_unit/main/main.c` (default `0`), sending the line `keyrelay-download` to the desk
   unit's USB-UART reboots it into the ROM bootloader, so you can update it without opening the case.
   While that USB-C port is connected to a computer, **any program on that computer** can then reflash
   the unit or read its flash, including the PSK. If you enable it, power the desk unit from a plain
-  charger in daily use.
+  charger in daily use. On a hardened unit (secure download mode) the risk is much smaller: a program on
+  the computer can no longer read flash, and anything it writes must be signed and encrypted with your
+  keys to boot.
 - **The receiver's UART ("COM") port.** On typical ESP32-S3 dev boards this port can reset the chip
   into the bootloader. Leave it unplugged in daily use; only the native USB port needs to be connected.
 - **Relay distance.** WebAuthn assumes the authenticator is physically next to the computer. KeyRelay

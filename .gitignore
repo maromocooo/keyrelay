@@ -1,5 +1,6 @@
 # ESP-IDF
 build/
+build-*/
 sdkconfig
 sdkconfig.old
 managed_components/
@@ -9,8 +10,10 @@ dependencies.lock
 *.key
 *key*.bin
 ydkey.bin
-# Secure boot signing keys (docs/HARDENING.md)
+# Secure boot signing keys and flash encryption keys (docs/HARDENING.md)
 *.pem
+*-enc.bin
+hardened-images/
 
 # Host tests / Python
 firmware/tests/host/test_frag

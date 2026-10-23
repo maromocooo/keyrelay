@@ -1,83 +1,248 @@
-# KeyRelay の守りを固める（下書き・未検証）
+# KeyRelay の守りを固める
 
 [English](../HARDENING.md)
 
-> **状態: 下書きです。このページの内容は、まだ KeyRelay の実機で1つも試していません。**
-> セキュアブートとフラッシュ暗号化は、ESP32-S3 の eFuse を書き込みます。**元には戻せません。**
-> 間違えると、二度と起動しない、または二度と更新できない基板になることがあります。必ず予備の基板で
-> 先に試し、Espressif の公式ガイドに従ってください（このページより公式ガイドが優先です）:
-> [Secure Boot v2](https://docs.espressif.com/projects/esp-idf/en/v5.4/esp32s3/security/secure-boot-v2.html)、
+> **状態: パソコン上では確かめましたが、実機ではまだです。** 固めたビルドの設定で2台ともビルドできること
+> （CI でも確認）、署名と暗号化のスクリプトがテスト用の鍵で動くこと、下の eFuse の手順が仮想の ESP32-S3
+> （`espefuse --virt`）で最後まで通ることは確かめました。KeyRelay の実機では、まだ誰も試していません。
+>
+> eFuse の操作は**どれも元に戻せません**。間違えると、二度と起動しない基板や、二度と更新できない基板に
+> なることがあります。**必ず予備の基板で最後まで一度試してください。** Espressif の公式ドキュメントが、
+> このページより優先です:
+> [Security Features Enablement Workflows](https://docs.espressif.com/projects/esp-idf/en/v5.4.4/esp32s3/security/security-features-enablement-workflows.html)、
 > [Flash Encryption](https://docs.espressif.com/projects/esp-idf/en/v5.4/esp32s3/security/flash-encryption.html)、
-> [NVS Encryption](https://docs.espressif.com/projects/esp-idf/en/v5.4/esp32s3/api-reference/storage/nvs_encryption.html)、
-> [セキュリティの概要](https://docs.espressif.com/projects/esp-idf/en/v5.4/esp32s3/security/security.html)。
+> [Secure Boot v2](https://docs.espressif.com/projects/esp-idf/en/v5.4/esp32s3/security/secure-boot-v2.html)、
+> [NVS Encryption](https://docs.espressif.com/projects/esp-idf/en/v5.4/esp32s3/api-reference/storage/nvs_encryption.html)。
 
 ## 何が守れて、何を失うか
 
-何もしないと、機器を手に入れた人はフラッシュからペアリング用の鍵（PSK）と BLE のペアリング情報を
-読み出せます。PIN を記録するように書き換えたファームを書き込むこともできます（[SECURITY.md](SECURITY.md)）。
+何もしないと、機器を数分借りた人が、フラッシュからペアリング用の鍵（PSK）と BLE のペアリング情報を
+読み出し、どちらの機器にもなりすませます。PIN を記録するように書き換えたファームを書き込むこともできます
+（[SECURITY.md](SECURITY.md)）。この手順のあとは、次のようになります。
 
 | 機能 | 守れるもの | 代わりに失うもの |
 |---|---|---|
-| フラッシュ暗号化 | PSK（`ydkey`）・アプリ・ペアリング情報（NVS 暗号化と組み合わせて）の読み出し | ふつうの `esptool.py write_flash` で更新できなくなる |
+| フラッシュ暗号化（Release モード） | フラッシュを読み出しても暗号文だけ（PSK・アプリ・NVS の鍵） | 更新には、その機器の鍵で暗号化したイメージが要る（`make_images.sh`） |
 | セキュアブート v2 | 自分の鍵で署名したファームしか動かない | 署名鍵の管理。なくすと二度と更新できない |
-| NVS 暗号化 | BLE のペアリング情報、レシーバーが覚えた机上ユニット | 鍵用のパーティションか eFuse の鍵 |
-| ROM のダウンロードモードを制限・無効化 | UART / USB からの読み出しと勝手な書き込み | UART からの復旧が限られる、またはできなくなる |
+| NVS 暗号化 | BLE のペアリング情報、レシーバーが覚えた机上ユニット | 実質なし（鍵は最初の起動で自動で作られる） |
+| セキュアダウンロードモード | USB / UART の ROM ローダーからフラッシュの読み出しや RAM でのコード実行ができない | esptool に `--no-stub` が要る。デバッグ用の読み出しもできない |
+| JTAG の無効化 | デバッガーからの操作 | デバッガーが使えない |
 
-いじって遊ぶ用の**開発ビルド**と、普段使う機器用の**固めたビルド**を分けて持つのがおすすめです。
+フラッシュ暗号化の *Development* モードでは**足りません**。ROM のダウンロードモードから RAM に
+コードを読み込ませると、そのコードは復号されたフラッシュを読めるからです。そのため、この手順では
+Release モードとセキュアダウンロードモードを使います。
 
-## KeyRelay で気をつけること
+### フラッシュ暗号化の鍵を誰が作るか
 
-### 1. パーティション表をずらす必要がある
+- **自分のパソコンで作る（この手順）。** その機器の鍵で暗号化したイメージを書き込めば、あとから USB / UART で
+  更新できます。鍵はオフラインで保管します。鍵と、機器のフラッシュのチップの両方を手に入れた人は中身を
+  復号できます。**機器ごとに別の鍵**にしてください。
+- **チップが最初の起動で作る**（このページでは手順を書いていません）。鍵は誰にも分かりませんが、KeyRelay には
+  無線での更新（OTA）がないので、ファームは二度と更新できなくなります。
 
-セキュアブートとフラッシュ暗号化を入れたブートローダーは大きくなり、`0x8000` の手前に収まらなく
-なります。パーティション表の位置（`CONFIG_PARTITION_TABLE_OFFSET`、例: `0x10000`）を後ろにずらし、
-後ろのパーティションも合わせてずらします。`ydkey` を `0x190000` のまま残して、鍵の書き込みコマンドを
-変えずに済む例です（**未検証**）:
+## 全体の流れ
 
+1. 道具と、固めたビルドのイメージ（署名なし）を用意する
+2. パソコンで鍵を作る
+3. チップを確かめて消去する
+4. フラッシュ暗号化の eFuse を書く
+5. セキュアブートの eFuse を書く
+6. イメージを署名・暗号化して書き込む
+7. 最初の起動。ファームが自分でセキュアダウンロードモードを有効にする。すべて確かめる
+
+順番が大事です。
+
+- **フラッシュ暗号化を先、セキュアブートを後に。** セキュアブートは読み出し禁止の eFuse を書き込み禁止に
+  するので、先にやると、あとからフラッシュ暗号化の鍵を読み出し禁止にできなくなります。
+- **eFuse の作業はすべて、最初の起動より前に。** 最初の起動でファームがセキュアダウンロードモードを
+  有効にし、それ以降は `espefuse` で何も書けなくなります。
+
+固めるのは、机の上に出ている机上ユニットからがおすすめです。ペアリング情報は空から始まる（暗号化された
+NVS に移るため）ので、2台は自分でペアリングし直します。
+
+## 1. 道具とイメージ
+
+esptool v5 を仮想環境に入れます（以下のコマンドは、その `esptool`・`espefuse`・`espsecure` を使います）。
+
+```sh
+python3 -m venv ~/keyrelay-venv
+~/keyrelay-venv/bin/pip install esptool
+source ~/keyrelay-venv/bin/activate
+esptool version
 ```
-# Name,   Type, SubType,  Offset,   Size,     Flags
-nvs,      data, nvs,      0x11000,  0x6000
-phy_init, data, phy,      0x17000,  0x1000
-nvs_key,  data, nvs_keys, 0x18000,  0x1000,   encrypted
-factory,  app,  factory,  0x20000,  0x170000
-ydkey,    data, 0x40,     0x190000, 0x1000,   encrypted
+
+固めたイメージは、ESP-IDF v5.4 でリポジトリの一番上から次のようにビルドします（机上ユニットの例。
+あとでケースを開けずに更新したいなら、先に `firmware/desk_unit/main/main.c` の `YD_UART_DOWNLOAD_CMD` を
+`1` にします）。
+
+```sh
+idf.py -C firmware/desk_unit -B firmware/desk_unit/build-hardened \
+  -D SDKCONFIG=firmware/desk_unit/build-hardened/sdkconfig \
+  -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;../hardening/sdkconfig.hardened" build
 ```
 
-`ydkey` にはリポジトリの時点で `encrypted` を付けてあるので、フラッシュ暗号化の対象になります。
-アプリの領域は少し小さくなりますが（1.47MB）、今のイメージは十分に収まります。
+[`firmware/hardening/sdkconfig.hardened`](../../firmware/hardening/sdkconfig.hardened) と
+[`partitions_hardened.csv`](../../firmware/hardening/partitions_hardened.csv) を使います。セキュアブートの
+ブートローダーは約 44KB あるので、パーティション表は `0x10000` に移しています。ビルドの最後に
+「App built but not signed」と出ますが、署名は手順6で行うので、それで正常です。使うファイルは次の3つです。
 
-### 2. 設定（両方のプロジェクトで `idf.py menuconfig` → Security features）
+- `build-hardened/bootloader/bootloader.bin`
+- `build-hardened/partition_table/partition-table.bin`
+- `build-hardened/keyrelay_desk_unit.bin`（レシーバーは `keyrelay_receiver.bin`）
 
-- `CONFIG_SECURE_BOOT` と `CONFIG_SECURE_BOOT_V2_ENABLED`。
-  `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES` はオンのままにし、`CONFIG_SECURE_BOOT_SIGNING_KEY` に
-  次のコマンドで作った鍵を指定します。
-  `espsecure.py generate_signing_key --version 2 --scheme rsa3072 secure_boot_signing_key.pem`
-  鍵はリポジトリの外に置き（`*.pem` は `.gitignore` に入っています）、オフラインでバックアップします。
-- `CONFIG_SECURE_FLASH_ENC_ENABLED`。予備の基板では `CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT`、
-  普段使いでは `CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE`。
-- UART の ROM ダウンロードモード: `CONFIG_SECURE_ENABLE_SECURE_ROM_DL_MODE`（Secure Download Mode）か
-  `CONFIG_SECURE_DISABLE_ROM_DL_MODE`。
-- `CONFIG_NVS_ENCRYPTION` と `CONFIG_NVS_SEC_KEY_PROTECT_USING_FLASH_ENC`（上の `nvs_key` パーティションを
-  使う）。`nvs_key` は最初に起動する前に消去しておく必要があります。eFuse の鍵を使う
-  `CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC` もあります。
-- 机上ユニットの `YD_UART_DOWNLOAD_CMD` は `0` のまま。固めた機器に、ブートローダーへの近道を残さない。
-- OTP を使わないなら、レシーバーは `CONFIG_YD_OTP_KEYBOARD=n` でビルドすることも検討してください。
+## 2. 鍵を作る
 
-### 3. 最初の書き込み
+鍵はすべてリポジトリの外に置き、オフラインのバックアップ（パスワードマネージャーなど）も取ってください。
+下のファイル名は、間違って作業ツリーに置いても `.gitignore` で弾かれる名前にしてあります。
 
-まとめたイメージと鍵ファイルを、[BUILD.md](BUILD.md) とまったく同じように平文で書き込みます。
-**最初の起動**で、ブートローダーが eFuse を書き込み、ブートローダー・アプリ・`encrypted` の付いた
-パーティション（`ydkey`、`nvs_key`）をその場で暗号化します。最大1分ほどかかります。
-**この最初の起動の間は、絶対に電源を抜かないでください。** ログでフラッシュ暗号化とセキュアブートが
-有効になったことを確かめ、`espefuse.py summary` でも確認します。
+```sh
+mkdir -p ~/keyrelay-secrets && cd ~/keyrelay-secrets
+# セキュアブートの署名鍵: 2台で共通でかまいません
+espsecure generate-signing-key --version 2 --scheme rsa3072 secure-boot-key.pem
+espsecure digest-sbv2-public-key --keyfile secure-boot-key.pem --output secure-boot-digest.bin
+# フラッシュ暗号化の鍵: 機器ごとに1つ（32バイト、AES-128-XTS）
+espsecure generate-flash-encryption-key flash-encryption-key-desk.bin
+espsecure generate-flash-encryption-key flash-encryption-key-receiver.bin
+```
 
-### 4. そのあとの更新
+`secure-boot-key.pem` か、その機器のフラッシュ暗号化の鍵をなくすと、その機器は二度と更新できません。
+ペアリング用の鍵 `keyrelay-key.bin` は、今までと同じファイルです（2台共通）。
 
-- **Development モード:** `idf.py encrypted-app-flash` や `esptool.py --encrypt` で、暗号化して書き直せます。
-  ただし、平文の書き込みを有効に戻せる回数は eFuse で限られています。
-- **Release モード:** シリアルから書いても暗号化してくれず、読み出しも止まります。KeyRelay には OTA
-  （無線での更新）がまだありません。暗号化済みイメージか OTA での更新方法を先に用意しない限り、
-  Release モードの機器のファームは固定と考えてください。
+## 3. つないで、確かめて、消去する
 
-試した人は、うまくいったこと（いかなかったこと）を Issue で教えてください。このページを下書きから
-卒業させたいです。
+- **机上ユニット:** XIAO 自身の USB-C を、**B** を押しながらつなぎます（組み立て前、またはケースを開けて
+  プラグ基板を抜いた状態）。ポートは USB JTAG/serial のもの（VID `0x303a`）です。
+- **レシーバー:** COM / UART 側です。
+
+```sh
+espefuse --chip esp32s3 -p ポート summary
+```
+
+先に進む前に、次を確かめます: `SPI_BOOT_CRYPT_CNT` が `Disable`、`SECURE_BOOT_EN` が `False`、
+`ENABLE_SECURITY_DOWNLOAD` が `False`、`KEY_PURPOSE_0` と `KEY_PURPOSE_1` が `USER`（空き）。
+違っていたら、そのチップは新品ではないので中止します。
+
+```sh
+esptool --chip esp32s3 -p ポート erase-flash
+```
+
+## 4. フラッシュ暗号化の eFuse（元に戻せません）
+
+`espefuse` はコマンドごとに `BURN` と打つよう求めます。鍵は、*いま作業している機器の*ものを使います。
+
+```sh
+espefuse --chip esp32s3 -p ポート burn-key BLOCK_KEY0 ~/keyrelay-secrets/flash-encryption-key-desk.bin XTS_AES_128_KEY
+espefuse --chip esp32s3 -p ポート burn-efuse SPI_BOOT_CRYPT_CNT 7
+espefuse --chip esp32s3 -p ポート burn-efuse DIS_DOWNLOAD_ICACHE 1 DIS_DOWNLOAD_DCACHE 1 HARD_DIS_JTAG 1 \
+  DIS_DIRECT_BOOT 1 DIS_USB_JTAG 1 DIS_DOWNLOAD_MANUAL_ENCRYPT 1
+espefuse --chip esp32s3 -p ポート write-protect-efuse DIS_ICACHE
+```
+
+`burn-key` は鍵のブロックを読み出し禁止にします。`summary` では `BLOCK_KEY0` が読めなくなり、
+`KEY_PURPOSE_0 = XTS_AES_128_KEY` になります。`DIS_USB_JTAG` が止めるのは USB 経由の JTAG だけです。
+XIAO の USB は、キー用の USB ホストとしても、書き込み用としても使えます。
+
+## 5. セキュアブートの eFuse（元に戻せません）
+
+```sh
+espefuse --chip esp32s3 -p ポート burn-key BLOCK_KEY1 ~/keyrelay-secrets/secure-boot-digest.bin SECURE_BOOT_DIGEST0
+espefuse --chip esp32s3 -p ポート burn-efuse SECURE_BOOT_EN 1 SOFT_DIS_JTAG 7
+espefuse --chip esp32s3 -p ポート write-protect-efuse RD_DIS
+```
+
+任意: 2つ目の署名鍵を足すことがないなら、使わない2つの枠を無効にします
+（`burn-efuse SECURE_BOOT_KEY_REVOKE1 1 SECURE_BOOT_KEY_REVOKE2 1`）。`SECURE_BOOT_AGGRESSIVE_REVOKE` は
+**書かないでください**。鍵が1つしかないと、検証に失敗したイメージ1つでその鍵が無効になり、二度と
+起動しなくなります。
+
+もう一度 `summary` を実行して、出力を残しておきます: `SPI_BOOT_CRYPT_CNT = Enable (0b111)`、
+`SECURE_BOOT_EN = True`、`KEY_PURPOSE_1 = SECURE_BOOT_DIGEST0`。
+
+## 6. 署名・暗号化して書き込む
+
+[`firmware/hardening/make_images.sh`](../../firmware/hardening/make_images.sh) が、ブートローダーとアプリへの署名、
+ペアリング用の鍵の埋め草と暗号化、各イメージのアドレスに合わせた暗号化をまとめて行い、書き込みのコマンドを
+表示します。
+
+```sh
+B=firmware/desk_unit/build-hardened
+firmware/hardening/make_images.sh $B/bootloader/bootloader.bin $B/keyrelay_desk_unit.bin \
+  $B/partition_table/partition-table.bin ~/keyrelay-secrets/secure-boot-key.pem \
+  ~/keyrelay-secrets/flash-encryption-key-desk.bin keyrelay-key.bin ~/keyrelay-secrets/images-desk
+```
+
+「Signature block 0 is valid」の2行に出る公開鍵のダイジェストが、`secure-boot-digest.bin` と同じかを
+確かめます（`xxd -p secure-boot-digest.bin`）。そのあと、表示された「First flash」のコマンドを実行します。
+
+```sh
+esptool --chip esp32s3 -p ポート --no-stub write-flash --flash-mode keep --flash-freq keep --flash-size keep --force \
+  0x0 ~/keyrelay-secrets/images-desk/bootloader-enc.bin 0x10000 ~/keyrelay-secrets/images-desk/partition-table-enc.bin \
+  0x20000 ~/keyrelay-secrets/images-desk/app-enc.bin 0x190000 ~/keyrelay-secrets/images-desk/ydkey-enc.bin
+```
+
+- `--flash-mode keep --flash-freq keep --flash-size keep`: 暗号化・署名済みのブートローダーのヘッダーを
+  esptool に書き換えさせないため。
+- `--force`: セキュアブートが有効なチップのブートローダーの領域には、これがないと esptool が書き込みません。
+- `nvs_key` パーティション（`0x18000`）は、わざと消去したままにします。NVS の鍵はファームが最初の起動で作ります。
+
+この時点ならまだセキュアダウンロードモードになっていないので、間違えても書き直せます。
+
+## 7. 最初の起動と確認
+
+機器をリセットして、ログを見ます。机上ユニットは CP2102N のコンソール（配線前なら、KeyRelay がポートを
+USB ホストに切り替えるまでは XIAO の USB にも出ます）、レシーバーは COM 側で、どちらも 115200bps です。
+次が出れば成功です。
+
+- ブートローダー: `secure boot v2 is already enabled, continuing..`、`Verifying image signature...`、
+  `Flash encryption mode is RELEASE`、`Enabling Security download mode...`
+- KeyRelay: `NVS partition "nvs" is encrypted.`、`Key loaded (0x190000)`、そのあといつものペアリングと
+  `▶ BLE link up`
+
+パソコンからも確かめます。
+
+```sh
+esptool --chip esp32s3 -p ポート --no-stub get-security-info
+```
+
+セキュアブートとフラッシュ暗号化が有効で、セキュアダウンロードモードがオンになっているはずです。
+続けて、ペアリング用の鍵を読み出してみます。これは**失敗しなければいけません**。
+
+```sh
+esptool --chip esp32s3 -p ポート --no-stub read-flash 0x190000 0x1000 should-fail.bin
+```
+
+最後に、[BUILD.md](BUILD.md) の6章の動作確認（FIDO・`gpg --card-status`・OTP）をもう一度行います。
+
+予備の基板では、署名のないファームが拒否されることも確かめられます。*署名していない*アプリを
+`espsecure encrypt-flash-data --aes-xts --keyfile … --address 0x20000` で暗号化して `0x20000` に書くと、
+ブートローダーが `Secure Boot V2 verification failed.` で止まるはずです。確かめたら、署名したイメージを
+書き直してください。
+
+## 固めた機器を更新する
+
+手順1と同じようにビルドし、同じ鍵で `make_images.sh` を実行して、アプリだけを書きます（ペアリング用の鍵と
+BLE のペアリング情報は残ります）。
+
+```sh
+esptool --chip esp32s3 -p ポート --no-stub write-flash --flash-mode keep --flash-freq keep --flash-size keep \
+  0x20000 ~/keyrelay-secrets/images-desk/app-enc.bin
+```
+
+esptool が安全のための確認で止まったら、アドレスを確かめてから `--force` を付けます。
+
+ケースを閉じたままの机上ユニットは、シリアルコンソールのダウンロードコマンド（`YD_UART_DOWNLOAD_CMD 1`、
+BUILD.md の9章）を使い、`-p ポート` のあとに `--before no-reset` を足します。固めた機器では、この方法の危険は
+前よりずっと小さくなります。セキュアダウンロードモードでは、パソコンのソフトはフラッシュに書けても読めず、
+書いたものも、あなたの鍵で署名・暗号化していなければ起動しないからです。
+
+## うまくいかないとき
+
+- **手順6のあと起動しない。** 各イメージが、その機器の鍵で、それぞれのアドレス用に暗号化されているかを
+  確かめます。`espsecure decrypt-flash-data --aes-xts --keyfile … --address 0x190000 --output check.bin
+  ydkey-enc.bin` で `YDK1…` に戻れば正しいです。そのあと書き直します。
+- **鍵をなくした。** 署名鍵か、その機器のフラッシュ暗号化の鍵がないと、その機器は更新できません。
+  いまのファームのまま動き続けます。
+- **ここに書いたことは、どれも元に戻せません。** 固めるのをやめたい機器は、取り替えるしかありません。
+
+試した人は、うまくいったこと（いかなかったこと）を Issue で教えてください。このページに
+「実機で確認済み」と書けるようにしたいです。
