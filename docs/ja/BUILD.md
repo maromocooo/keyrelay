@@ -212,8 +212,19 @@ esptool.py --chip esp32s3 -p ポート write_flash 0x0 firmware/receiver/build/k
   `gpgconf --kill scdaemon` を実行してからやり直してください。
 - GnuPG は `~/.gnupg/scdaemon.conf` に `disable-ccid` と `pcsc-shared` を書くと、macOS の
   スマートカード機能経由で、ほかのツールとカードを共有して使えます。
+- **レシーバーは、既定では Yubico OTP しか打ちません**（ModHex の文字と Enter）。静的パスワード・
+  OATH-HOTP の数字・Tab の設定を使うスロットがあるなら、レシーバーを menuconfig → KeyRelay →
+  「Keys the OTP keyboard may type」→「Any key」でビルドしてください。止めたキー入力はログに出ます。
+  理由は SECURITY.md にあります。
+- **NFC を使わないなら、キーの NFC を切っておく。** 机に置いたキーは、かざされたスマホに誰のものでも
+  応答します。キーをパソコンに直接挿して `ykman config nfc --disable-all` を実行します。
 
 ## 9. 机上ユニットを更新する
+
+**2台はいっしょに、机上ユニットから更新してください。** 2台のリンクの版がそろっている必要があります。
+新しい机上ユニットは版の違いをログに出しますが、古い机上ユニットは版を名乗らないので、レシーバーには
+ヒント（「机上ユニットがこちらの HELLO を受け付けませんでした」）だけが出ます。2台とも更新すれば、必要なら
+自分でペアリングし直します。
 
 アプリだけを `0x10000` に書きます。`0x190000` の鍵も BLE のペアリング情報もそのまま残ります。
 

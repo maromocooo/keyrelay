@@ -19,7 +19,7 @@ plugged into your computer. Touch the key on your desk; your computer can stay c
 |---|---|---|
 | FIDO2 / U2F (passkeys, WebAuthn) | 64-byte CTAPHID reports | Works: webauthn.io register + sign-in (Chrome) |
 | OpenPGP (GnuPG) | CCID smart-card messages | Works: `gpg --card-status` |
-| OTP typed on touch | keyboard reports, buffered per key press | Works: Yubico OTP validated on demo.yubico.com |
+| OTP typed on touch | keyboard reports, sent as a fixed sequence per touch; only Yubico OTP keys by default | Works: Yubico OTP validated on demo.yubico.com |
 | PIV, OATH | CCID smart-card messages | Relayed; see the note on Yubico tools below |
 | OTP challenge-response, slot configuration | HID feature reports, proxied one by one | Relayed; see the note on Yubico tools below |
 
@@ -50,8 +50,9 @@ Browsers (FIDO), GnuPG and typed OTPs work as is.
   virtualised so channels survive re-enumeration).
 - The **receiver** (any ESP32-S3 board with a native USB port) shows up as the same three interfaces
   and forwards everything to the desk unit.
-- The BLE link uses LE Secure Connections plus an application-layer pre-shared key with AES-256-GCM.
-  See [SECURITY.md](SECURITY.md) for what this does and does not protect.
+- The BLE link uses LE Secure Connections plus an application layer with a pre-shared key, ephemeral
+  X25519 (forward secrecy) and AES-256-GCM. See [SECURITY.md](SECURITY.md) for what this does and does
+  not protect.
 - Both units are USB powered. The desk unit takes power (and its log console) through a CP2102N
   USB-UART module whose USB-C port sits at the back of the case.
 
@@ -73,10 +74,11 @@ idf.py -C firmware/desk_unit set-target esp32s3 build merge-bin -o keyrelay_desk
 
 ```
 firmware/
-  components/yd_link/   BLE link, PSK encryption (yd_sec), fragmentation, CCID helpers
+  components/yd_link/   BLE link, PSK + X25519 encryption (yd_sec), fragmentation, CCID helpers
   desk_unit/            USB host side: FIDO, CCID and OTP relays (XIAO ESP32S3)
   receiver/             USB device side: FIDO HID, CCID, OTP keyboard drivers (TinyUSB)
   tests/host/           host-side unit tests (make -C firmware/tests/host)
+  tests/fuzz/           libFuzzer targets for the link input (make -C firmware/tests/fuzz run)
 hardware/
   case/                 parametric case (Python + manifold3d) and ready-to-print STLs
 docs/                   build guide (English / Japanese), images
