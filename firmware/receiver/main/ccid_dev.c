@@ -381,11 +381,12 @@ static void handle_host(const uint8_t *m, size_t n, bool card)
 
 static void handle_desk(const uint8_t *m, size_t n)
 {
-    if (n < YD_CCID_HDR || yd_ccid_dwlen(m) != n - YD_CCID_HDR) {
+    /* Mac には、名乗っている上限（dwMaxCCIDMessageLength）に収まり、待っている要求の種類・スロットに合う応答だけを渡す */
+    if (!yd_ccid_valid(m, n)) {
         ESP_LOGW(TAG, YD_L("Malformed response from the desk unit (len=%u)", "机上ユニットから形式不正の応答 (len=%u)"), (unsigned)n);
         return;
     }
-    if (!s_pend.active || m[6] != s_pend.seq) {
+    if (!s_pend.active || m[6] != s_pend.seq || m[5] != 0 || m[0] != yd_ccid_resp_type(s_pend.type)) {
         ESP_LOGW(TAG, YD_L("Dropping unexpected response (type=0x%02x seq=%u)", "待っていない応答を破棄 (type=0x%02x seq=%u)"), m[0], m[6]);
         return;
     }

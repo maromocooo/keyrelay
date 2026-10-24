@@ -1027,7 +1027,10 @@ static bool open_device(uint8_t addr)
         if (!hid_is_fido(itf->bInterfaceNumber, rd_len, verbose)) {
             continue;
         }
-        /* エンドポイント取得 */
+        /* エンドポイント取得。IN の受信バッファ（xfer_in）は FIDO_REPORT_LEN バイトなので、
+         * CTAPHID のレポートと同じ 64 バイトのパケットのものだけを使う */
+        uint8_t ep_in = 0, ep_out = 0;
+        uint16_t mps = 0;
         for (int e = 0; e < 2; e++) {
             int o3 = offset;
             const usb_ep_desc_t *ep = usb_parse_endpoint_descriptor_by_index(itf, e, cd->wTotalLength, &o3);
@@ -1035,12 +1038,20 @@ static bool open_device(uint8_t addr)
                 continue;
             }
             if (ep->bEndpointAddress & 0x80) {
-                k.ep_in = ep->bEndpointAddress;
-                k.mps = USB_EP_DESC_GET_MPS(ep);
+                ep_in = ep->bEndpointAddress;
+                mps = USB_EP_DESC_GET_MPS(ep);
             } else {
-                k.ep_out = ep->bEndpointAddress;
+                ep_out = ep->bEndpointAddress;
             }
         }
+        if (!ep_in || !ep_out || mps != FIDO_REPORT_LEN) {
+            ESP_LOGW(TAG, YD_L("FIDO HID endpoints not usable (IN=0x%02x OUT=0x%02x MPS=%u)", "FIDO HID のエンドポイントが使えません（IN=0x%02x OUT=0x%02x MPS=%u）"),
+                     ep_in, ep_out, mps);
+            continue;
+        }
+        k.ep_in = ep_in;
+        k.ep_out = ep_out;
+        k.mps = mps;
         k.fido_itf = itf->bInterfaceNumber;
         if (verbose) {
             ESP_LOGI(TAG, YD_L("→ Found FIDO HID: itf%u EP IN=0x%02x OUT=0x%02x MPS=%u", "→ FIDO HID を発見: itf%u EP IN=0x%02x OUT=0x%02x MPS=%u"),

@@ -97,6 +97,7 @@ static volatile xfer_result_t s_in_result;   /* キーボードの IN 転送の�
 static volatile bool s_get_pending;
 static volatile uint8_t s_get_tag;
 static volatile int64_t s_get_t0;
+static tusb_control_request_t s_get_req;     /* 保留した GET_REPORT の要求（返事の長さを wLength に合わせる） */
 
 /* ---- キュー ---- */
 typedef struct {
@@ -140,8 +141,8 @@ static void get_finish(void *param)
     }
     s_get_pending = false;
     if (ok) {
-        tusb_control_request_t dummy = { 0 };   /* tud_control_xfer は保存済みの要求を使う */
-        tud_control_xfer(0, &dummy, s_get_buf, KBD_REPORT_LEN);
+        /* 受けたときの要求を渡す。TinyUSB の版によっては、渡した要求の wLength で返す長さを決める */
+        tud_control_xfer(0, &s_get_req, s_get_buf, KBD_REPORT_LEN);
     } else {
         usbd_edpt_stall(0, 0x80);
         usbd_edpt_stall(0, 0x00);
@@ -267,6 +268,7 @@ static bool otpd_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_req
             if (!s_ctl_on) {
                 return false;   /* 机上ユニットが未対応・未接続 → STALL */
             }
+            s_get_req = *req;
             s_get_tag++;
             s_get_pending = true;
             s_get_t0 = now_ms();
