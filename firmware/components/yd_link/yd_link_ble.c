@@ -108,7 +108,7 @@ static volatile uint32_t s_gen;
 static volatile bool s_up;                     /* yd_sec の相互認証まで完了（アプリにとっての「接続」） */
 static volatile bool s_closing;                /* 切ると決めた。切断が終わるまでデータもハンドシェイクも進めない */
 static volatile bool s_conn_authed;            /* この接続で相互認証が通った */
-static volatile bool s_forget_on_disconnect;   /* 認証前の失敗で、こちらから切った */
+static volatile bool s_key_mismatch;           /* 相手の PSK が違う（AUTH が合わない）ので、こちらから切った */
 static SemaphoreHandle_t s_link_mutex;
 static SemaphoreHandle_t s_state_mutex;        /* state_cb を1つずつ呼ぶ */
 static bool s_reported_up;                     /* state_cb で最後に知らせた値（s_state_mutex で守る） */
@@ -134,6 +134,17 @@ static volatile bool s_conn_was_bonded;        /* 接続した時点で、この
 static volatile uint32_t s_ev_drops;           /* 受信キューに状態の通知を入れられなかった回数 */
 static uint32_t s_bond_delete_fail;            /* 消すべきボンドを消せなかった回数 */
 static ble_addr_t s_target;
+
+/* 受付時間中の再ペアリングで消した、古いボンドの退避（机上ユニット。yd_bond_policy.h）。ホストタスクだけが触る
+ * （ydl_ble_forget_peers は active を下ろすだけ）。RAM だけに置き、再起動したら消える */
+static struct {
+    volatile bool active;
+    uint32_t gen;                              /* 退避した接続の世代 */
+    ble_addr_t addr;
+    struct ble_store_value_sec our, peer;
+    struct ble_store_value_cccd cccd;          /* レシーバーの通知の購読 */
+    bool have_cccd;
+} s_stash;
 
 /* ======================================================================
  *  接続パラメータの省電力切り替え（Peripheral = 机上ユニットのみ）
@@ -327,6 +338,12 @@ static void target_load(void)
     nvs_close(h);
 }
 
+/* 登録済みの机上ユニットか（レシーバー） */
+static bool is_target(const ble_addr_t *a)
+{
+    return s_have_target && ble_addr_cmp(a, &s_target) == 0;
+}
+
 static void target_save(const ble_addr_t *a)
 {
     nvs_handle_t h;
@@ -379,7 +396,7 @@ static void link_begin(uint16_t conn)
     s_up = false;
     s_closing = false;
     s_conn_authed = false;
-    s_forget_on_disconnect = false;
+    s_key_mismatch = false;
     s_peer_addr_valid = false;
     xSemaphoreGive(s_link_mutex);
     notify_state();
@@ -394,21 +411,23 @@ static void link_set_peer(const ble_addr_t *a)
     xSemaphoreGive(s_link_mutex);
 }
 
-/* 切れた（ホストタスク）。切れた接続が認証済みだったか・認証前の失敗で切ったかを返す。
+/* 切れた（ホストタスク）。切れた接続が認証済みだったか・相手の PSK が違うので切ったかと、その接続の世代を返す。
  * 世代が変わるので、これより後に古い接続の処理が切断を決めても、もう何も変わらない */
-static void link_end(bool *authed, bool *hs_failed)
+static uint32_t link_end(bool *authed, bool *key_mismatch)
 {
     xSemaphoreTake(s_link_mutex, portMAX_DELAY);
+    uint32_t gen = s_gen;
     *authed = s_conn_authed;
-    *hs_failed = s_forget_on_disconnect;
+    *key_mismatch = s_key_mismatch;
     s_conn = BLE_HS_CONN_HANDLE_NONE;
     s_gen++;
     s_up = false;
     s_closing = false;
     s_conn_authed = false;
-    s_forget_on_disconnect = false;
+    s_key_mismatch = false;
     xSemaphoreGive(s_link_mutex);
     notify_state();
+    return gen;
 }
 
 /* いまの接続と世代を、組み合わせが崩れないように読む。その時点で相互認証が済んでいれば（s_up）true */
@@ -467,9 +486,10 @@ static void link_keys_gone(uint32_t gen)
     }
 }
 
-#define CLOSE_HS_FAIL        0x01   /* 鍵の相互認証の前の失敗として切る（相手の BLE ボンドも消す） */
+#define CLOSE_HS_FAIL        0x01   /* 鍵の相互認証の前の失敗として切る（ログをエラーにする） */
 #define CLOSE_UNLESS_UP      0x02   /* いま相互認証が済んでいれば（s_up）切らない */
 #define CLOSE_UNLESS_AUTHED  0x04   /* この接続で一度でも相互認証が通っていれば切らない */
+#define CLOSE_KEY_MISMATCH   0x08   /* 相手の PSK が違う。前からのボンドも消す（yd_bond_policy.h） */
 
 /* gen の接続を切ると決めて、切断を要求する。切ったら true。gen がもう今の接続でない（切れた後の、古い接続の
  * 処理から呼ばれた）とき、すでに切ると決めているとき、flags の条件に当たるときは何もしない。
@@ -480,10 +500,11 @@ static bool close_conn(uint32_t gen, unsigned flags, const char *why)
     xSemaphoreTake(s_link_mutex, portMAX_DELAY);
     if (gen == s_gen && s_conn != BLE_HS_CONN_HANDLE_NONE && !s_closing &&
         !((flags & CLOSE_UNLESS_UP) && s_up) && !((flags & CLOSE_UNLESS_AUTHED) && s_conn_authed)) {
-        if ((flags & CLOSE_HS_FAIL) && !s_up) {
-            /* 鍵の相互認証が済む前の切断（不一致・時間切れ・形のおかしい HELLO/AUTH など）は理由を問わず、
-             * 相手の BLE ボンドも消す。正しい相手ならつなぎ直したときに自動でペアリングし直す */
-            s_forget_on_disconnect = true;
+        if ((flags & CLOSE_KEY_MISMATCH) && !s_up) {
+            /* 相手の PSK が違う。前からのボンドでも消す。それ以外の認証前の失敗（時間切れ・形のおかしい HELLO/AUTH
+             * など）では、この接続で作ったボンドだけを消す（conn_end）。前からのボンドを使って暗号化できた相手は
+             * 本物の相手で、こちらだけが忘れると、相手は暗号化に失敗し続けてつながらなくなるため */
+            s_key_mismatch = true;
         }
         s_closing = true;
         s_up = false;      /* 切断が終わるのを待たずに送受信を止める（後続の通し番号を相手に送らない） */
@@ -537,11 +558,17 @@ static void transport_ready(bool ready)
 }
 
 /* rx_task の中から、いま処理しているハンドシェイクの接続を切る（古い接続の処理なら何もしない）。
- * hs_fail: 失敗として切る（鍵の相互認証の前なら相手の BLE ボンドも消す）
- * hs_drop: 失敗の印を付けずに切る（版の違い・取りこぼしなど。前からのボンドは残る） */
+ * hs_fail: 失敗として切る（この接続で作ったボンドは消え、前からのボンドは残る）
+ * hs_mismatch: 相手の PSK が違うとして切る（前からのボンドも消す）
+ * hs_drop: 失敗の印を付けずに切る（版の違い・取りこぼしなど） */
 static void hs_fail(const char *why)
 {
     close_conn(s_hs_gen, CLOSE_HS_FAIL, why);
+}
+
+static void hs_mismatch(const char *why)
+{
+    close_conn(s_hs_gen, CLOSE_HS_FAIL | CLOSE_KEY_MISMATCH, why);
 }
 
 static void hs_drop(const char *why)
@@ -682,7 +709,7 @@ static void hs_progress(void)
         }
         if (!ok) {
             s_sec_fail++;
-            hs_fail(YD_L("Peer key does not match. Flash the same key file to both units", "相手の鍵が一致しません。2台に同じ鍵ファイルを書き込んでください"));
+            hs_mismatch(YD_L("Peer key does not match. Flash the same key file to both units", "相手の鍵が一致しません。2台に同じ鍵ファイルを書き込んでください"));
             return;
         }
         ble_addr_t peer;
@@ -1046,6 +1073,7 @@ uint32_t ydl_ble_conn_id(void)
 
 esp_err_t ydl_ble_forget_peers(void)
 {
+    s_stash.active = false;          /* 消したボンドを、切断のときに書き戻さない */
     ble_store_clear();
     nvs_handle_t h;
     if (nvs_open("yd_link", NVS_READWRITE, &h) == ESP_OK) {
@@ -1129,6 +1157,52 @@ static void periph_advertise(void)
     }
 }
 
+static void stash_clear(void)
+{
+    s_stash.active = false;
+    yd_sec_wipe(&s_stash, sizeof(s_stash));    /* LTK を残さない */
+}
+
+/* addr の古いボンドを退避する。読めなければ false（書き戻せないものは消さない） */
+static bool stash_save(const ble_addr_t *addr, uint32_t gen)
+{
+    struct ble_store_key_sec key = { .peer_addr = *addr };
+    stash_clear();
+    if (ble_store_read_our_sec(&key, &s_stash.our) != 0 || ble_store_read_peer_sec(&key, &s_stash.peer) != 0) {
+        stash_clear();
+        return false;
+    }
+    struct ble_store_key_cccd ck = { .peer_addr = *addr, .chr_val_handle = s_to_recv_val };
+    s_stash.have_cccd = ble_store_read_cccd(&ck, &s_stash.cccd) == 0;
+    s_stash.addr = *addr;
+    s_stash.gen = gen;
+    s_stash.active = true;
+    return true;
+}
+
+/* 退避したボンドを書き戻す。同じアドレスに残っているもの（途中までのペアリングなど）を先に消す */
+static void stash_restore(void)
+{
+    ble_store_util_delete_peer(&s_stash.addr);
+    int rc = ble_store_write_our_sec(&s_stash.our);
+    if (rc == 0) {
+        rc = ble_store_write_peer_sec(&s_stash.peer);
+    }
+    if (rc == 0 && s_stash.have_cccd) {
+        rc = ble_store_write_cccd(&s_stash.cccd);
+    }
+    if (rc != 0) {
+        ESP_LOGE(TAG, YD_L("Could not restore the bond replaced by re-pairing rc=%d. Hold BOOT for 3 s on both units and pair them again",
+                           "再ペアリングで置き換えたペアリング情報を書き戻せませんでした rc=%d。2台の BOOT を3秒押して、ペアリングし直してください"),
+                 rc);
+        ble_store_util_delete_peer(&s_stash.addr);   /* 半分だけ書けた状態を残さない */
+    }
+    print_addr(rc == 0 ? YD_L("The re-paired peer did not authenticate: restored the previous bond:", "再ペアリングした相手が相互認証を通らなかったので、前のペアリング情報に戻しました:")
+                       : YD_L("Peer:", "相手:"),
+               &s_stash.addr);
+    stash_clear();
+}
+
 /* 接続した（ホストタスク）。新しい世代を始め、この接続の前からボンドがあった相手かを覚えておく */
 static void conn_begin(uint16_t conn)
 {
@@ -1141,13 +1215,13 @@ static void conn_begin(uint16_t conn)
 /* 切れた（ホストタスク）。世代を進め、認証前に失敗した相手などの BLE ボンドを消す */
 static void conn_end(void)
 {
-    bool authed = false, hs_failed = false;
-    link_end(&authed, &hs_failed);
+    bool authed = false, key_mismatch = false;
+    uint32_t gen = link_end(&authed, &key_mismatch);
     yd_bond_conn_t c = {
         .peer_known = s_peer_addr_valid,
         .bonded_before_conn = s_conn_was_bonded,
         .authed = authed,
-        .hs_failed = hs_failed,
+        .key_mismatch = key_mismatch,
     };
     esp_timer_stop(s_conn_timer);
     if (yd_bond_forget_on_disconnect(&c)) {
@@ -1159,12 +1233,24 @@ static void conn_end(void)
                      rc, s_bond_delete_fail);
             print_addr(YD_L("Peer:", "相手:"), &s_peer_addr);
         } else {
-            print_addr(c.hs_failed ? YD_L("Deleted the bond of a peer that failed key authentication:", "鍵の相互認証に失敗した相手のペアリング情報を消しました:")
-                                   : YD_L("Deleted the bond of a peer that paired but disconnected before authenticating:", "ペアリングだけして認証前に切れた相手のペアリング情報を消しました:"),
+            print_addr(c.key_mismatch ? YD_L("Deleted the bond of a peer with a different key:", "鍵の違う相手のペアリング情報を消しました:")
+                                     : YD_L("Deleted the bond of a peer that paired but disconnected before authenticating:", "ペアリングだけして認証前に切れた相手のペアリング情報を消しました:"),
                        &s_peer_addr);
         }
     }
     s_conn_was_bonded = false;
+    /* この接続で作ったボンドを上で消してから、退避したボンドを書き戻す */
+    switch (yd_bond_stash_on_disconnect(s_stash.active, s_stash.gen == gen, authed)) {
+    case YD_STASH_RESTORE:
+        stash_restore();
+        break;
+    case YD_STASH_DISCARD:
+        print_addr(YD_L("The re-paired peer authenticated: keeping its new bond:", "再ペアリングした相手が相互認証を通ったので、新しいペアリング情報を使います:"), &s_stash.addr);
+        stash_clear();
+        break;
+    case YD_STASH_NOTHING:
+        break;
+    }
 }
 
 /* ボンドの保存先がいっぱいのとき。NimBLE 標準の ble_store_util_status_rr は一番古い相手を
@@ -1279,14 +1365,19 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_REPEAT_PAIRING:
-        if (!pairing_window_open()) {
-            ESP_LOGW(TAG, YD_L("Re-pairing request rejected (outside the pairing window)", "再ペアリング要求を拒否（受付時間外）"));
+        /* 古いボンドは退避してから消し、この接続が相互認証を通らなければ conn_end で書き戻す。レシーバーの
+         * アドレスを名乗るだけの機器に、本物のボンドを消させない（yd_bond_policy.h） */
+        if (yd_bond_on_repeat_pairing(pairing_window_open(), s_stash.active) == YD_REPEAT_REFUSE) {
+            ESP_LOGW(TAG, s_stash.active ? YD_L("Re-pairing request rejected (already re-pairing on this connection)", "再ペアリング要求を拒否（この接続で再ペアリング中）")
+                                         : YD_L("Re-pairing request rejected (outside the pairing window)", "再ペアリング要求を拒否（受付時間外）"));
             return BLE_GAP_REPEAT_PAIRING_IGNORE;
         }
-        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
-            ble_store_util_delete_peer(&desc.peer_id_addr);
+        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) != 0 || !stash_save(&desc.peer_id_addr, s_gen)) {
+            ESP_LOGW(TAG, YD_L("Re-pairing request rejected (could not save the previous bond)", "再ペアリング要求を拒否（前のペアリング情報を退避できない）"));
+            return BLE_GAP_REPEAT_PAIRING_IGNORE;
         }
-        s_conn_was_bonded = false;   /* 古いボンドを消して、この接続で作り直す */
+        ble_store_util_delete_peer(&desc.peer_id_addr);
+        s_conn_was_bonded = false;   /* この接続で作り直すボンドは、相互認証を通らなければ消える */
         return BLE_GAP_REPEAT_PAIRING_RETRY;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -1452,7 +1543,7 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
             hint_unmatched_adv(&event->disc);
             return 0;
         }
-        if (s_have_target && ble_addr_cmp(&event->disc.addr, &s_target) != 0) {
+        if (s_have_target && !is_target(&event->disc.addr)) {
             return 0;   /* 登録済みの机上ユニット以外は無視 */
         }
         central_connect(&event->disc.addr);
@@ -1498,7 +1589,17 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
         } else {
             ESP_LOGW(TAG, YD_L("Encryption failed status=%d (the peer may have lost its bond)", "暗号化失敗 status=%d（相手が鍵を失った可能性）"), event->enc_change.status);
             if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
-                ble_store_util_delete_peer(&desc.peer_id_addr);
+                if (is_target(&desc.peer_id_addr)) {
+                    /* 登録済みの机上ユニットのボンドは消さない。アドレスは偽装できるので、鍵を持たない機器が
+                     * 暗号化をわざと失敗させるだけで、本物とのボンドを消せてしまう（本物は受付時間外なので
+                     * ペアリングし直さず、つながらなくなる） */
+                    ESP_LOGW(TAG, YD_L("Keeping the registered desk unit's bond. If the desk unit's pairing data was erased, "
+                                       "hold BOOT on this receiver for 3 s too",
+                                       "登録済みの机上ユニットのペアリング情報は残します。机上ユニットのペアリング情報を消したときは、"
+                                       "このレシーバーの BOOT も3秒押してください"));
+                } else {
+                    ble_store_util_delete_peer(&desc.peer_id_addr);
+                }
             }
             ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
@@ -1541,9 +1642,16 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_REPEAT_PAIRING:
-        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
-            ble_store_util_delete_peer(&desc.peer_id_addr);
+        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) != 0) {
+            return BLE_GAP_REPEAT_PAIRING_IGNORE;
         }
+        if (is_target(&desc.peer_id_addr)) {
+            /* 上の暗号化の失敗と同じ理由で、登録済みの机上ユニットとはペアリングし直さない */
+            ESP_LOGW(TAG, YD_L("Re-pairing with the registered desk unit rejected (hold BOOT for 3 s to pair again)",
+                               "登録済みの机上ユニットとの再ペアリングを拒否（ペアリングし直すときは BOOT を3秒押してください）"));
+            return BLE_GAP_REPEAT_PAIRING_IGNORE;
+        }
+        ble_store_util_delete_peer(&desc.peer_id_addr);
         s_conn_was_bonded = false;
         return BLE_GAP_REPEAT_PAIRING_RETRY;
     }
