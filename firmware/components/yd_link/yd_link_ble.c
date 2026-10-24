@@ -1368,8 +1368,11 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
         /* 古いボンドは退避してから消し、この接続が相互認証を通らなければ conn_end で書き戻す。レシーバーの
          * アドレスを名乗るだけの機器に、本物のボンドを消させない（yd_bond_policy.h） */
         if (yd_bond_on_repeat_pairing(pairing_window_open(), s_stash.active) == YD_REPEAT_REFUSE) {
-            ESP_LOGW(TAG, s_stash.active ? YD_L("Re-pairing request rejected (already re-pairing on this connection)", "再ペアリング要求を拒否（この接続で再ペアリング中）")
-                                         : YD_L("Re-pairing request rejected (outside the pairing window)", "再ペアリング要求を拒否（受付時間外）"));
+            if (s_stash.active) {
+                ESP_LOGW(TAG, YD_L("Re-pairing request rejected (already re-pairing on this connection)", "再ペアリング要求を拒否（この接続で再ペアリング中）"));
+            } else {
+                ESP_LOGW(TAG, YD_L("Re-pairing request rejected (outside the pairing window)", "再ペアリング要求を拒否（受付時間外）"));
+            }
             return BLE_GAP_REPEAT_PAIRING_IGNORE;
         }
         if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) != 0 || !stash_save(&desc.peer_id_addr, s_gen)) {
