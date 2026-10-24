@@ -145,9 +145,11 @@ static inline yd_ccid_power_t yd_ccid_power_resp(const uint8_t *req, const uint8
     if (rsp[0] != yd_ccid_resp_type(req[0]) || (rsp[7] & 0xC0) != CCID_CMD_OK) {
         return YD_CCID_POWER_FAIL;
     }
-    /* PowerOn のあとはカードが動いていること。PowerOff のあとは止まっていること（いないのは失敗） */
+    /* PowerOn のあとはカードが動いていること。PowerOff のあとは動いていないこと（YubiKey 5 は止めたあと
+     * 「いない」(2) と答える。成功したかは続く PowerOn で確かめる） */
     uint8_t icc = rsp[7] & 0x03;
-    return icc == (req[0] == CCID_PC_POWER_ON ? CCID_ICC_ACTIVE : CCID_ICC_INACTIVE) ? YD_CCID_POWER_OK : YD_CCID_POWER_FAIL;
+    bool ok = req[0] == CCID_PC_POWER_ON ? icc == CCID_ICC_ACTIVE : (icc == CCID_ICC_INACTIVE || icc == CCID_ICC_ABSENT);
+    return ok ? YD_CCID_POWER_OK : YD_CCID_POWER_FAIL;
 }
 
 /* PC から届いたメッセージとして形が正しいか（長さがヘッダーと一致するか） */

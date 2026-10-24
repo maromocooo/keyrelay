@@ -31,7 +31,12 @@ int main(void)
     rsp(r, CCID_RDR_SLOT_STATUS, 7, CCID_CMD_OK | CCID_ICC_ACTIVE, 0);
     CHECK(yd_ccid_power_resp(off, r, YD_CCID_HDR) == YD_CCID_POWER_FAIL, "PowerOff that left the card active is a failure");
     rsp(r, CCID_RDR_SLOT_STATUS, 7, CCID_CMD_OK | CCID_ICC_ABSENT, 0);
-    CHECK(yd_ccid_power_resp(off, r, YD_CCID_HDR) == YD_CCID_POWER_FAIL, "no card is a failure");
+    CHECK(yd_ccid_power_resp(off, r, YD_CCID_HDR) == YD_CCID_POWER_OK,
+          "PowerOff answered with 'not present' (what a YubiKey 5 says after powering off) is a success");
+    rsp(r, CCID_RDR_SLOT_STATUS, 7, CCID_CMD_FAILED | CCID_ICC_ABSENT, CCID_ERR_ICC_MUTE);
+    CHECK(yd_ccid_power_resp(off, r, YD_CCID_HDR) == YD_CCID_POWER_FAIL, "a failed PowerOff is a failure even with the card gone");
+    rsp(r, CCID_RDR_DATA_BLOCK, 8, CCID_CMD_OK | CCID_ICC_ABSENT, 0);
+    CHECK(yd_ccid_power_resp(on, r, YD_CCID_HDR) == YD_CCID_POWER_FAIL, "PowerOn that leaves no card is a failure");
     rsp(r, CCID_RDR_SLOT_STATUS, 7, CCID_CMD_FAILED | CCID_ICC_ACTIVE, CCID_ERR_SLOT_BUSY);
     CHECK(yd_ccid_power_resp(off, r, YD_CCID_HDR) == YD_CCID_POWER_FAIL, "slot busy (an earlier request still running) is a failure");
     rsp(r, CCID_RDR_DATA_BLOCK, 7, CCID_CMD_OK | CCID_ICC_INACTIVE, 0);
