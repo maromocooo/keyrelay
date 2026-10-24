@@ -8,6 +8,11 @@
  * （64の倍数ぴったりのメッセージで長さ0のパケットが来るかどうかに依存しないため）。
  * 割り込みエンドポイント（カード挿抜通知）は YubiKey では意味がないので読まない。
  * カードの有無はレシーバーが「YubiKey の有無＋リンク状態」から自分で Mac に通知する。
+ *
+ * カード（PIV / OpenPGP）の状態は、PIN を確かめた接続のもの。レシーバーとつなぎ直したら、新しい接続の要求を
+ * 通す前に自分で PowerOff / PowerOn を送ってカードをリセットする（レシーバーが PowerOn を省いても PIN を
+ * 確かめ直させる）。できなければ、バスを止めて再列挙させるまで「カードなし」で答える。前の接続の要求、
+ * 組み立て途中の断片、前の接続の要求への応答は、新しい接続に流さない。
  */
 #include <string.h>
 #include <inttypes.h>
@@ -27,7 +32,9 @@ static const char *TAG = "ccid";
 
 #define IN_XFERS        2
 #define OUT_TIMEOUT_MS  2000
-#define MB_SIZE         (2 * (YD_CCID_BUF + 8))
+#define POWER_TIMEOUT_MS 3000       /* カードのリセット（PowerOff / PowerOn それぞれ）の応答を待つ上限 */
+#define CONN_TAG        4           /* 要求の先頭に付ける、届いた接続の番号（yd_link_conn_id） */
+#define MB_SIZE         (2 * (YD_CCID_BUF + CONN_TAG + 8))
 
 static struct {
     usb_host_client_handle_t client;
@@ -48,20 +55,29 @@ static uint8_t s_up_asm[YD_CCID_BUF];
 static size_t s_up_len;
 static bool s_up_discard;
 
-/* レシーバー → 組み立て（yd_link 受信タスク） */
-static uint8_t s_down_asm[YD_CCID_BUF];
+/* レシーバー → 組み立て（yd_link 受信タスク）。先頭 CONN_TAG バイトは接続の番号を入れる場所 */
+static uint8_t s_down_asm[CONN_TAG + YD_CCID_BUF];
 static yd_frag_rx_t s_down_rx;
+static uint32_t s_down_conn;          /* s_down_rx で組み立てている要求の接続 */
 
 /* ccid タスク */
-static uint8_t s_req[YD_CCID_BUF], s_rsp[YD_CCID_BUF];
+static uint8_t s_req[CONN_TAG + YD_CCID_BUF], s_rsp[YD_CCID_BUF];
 static MessageBufferHandle_t s_down_mb, s_up_mb;
 static TaskHandle_t s_task;
 static volatile int64_t s_last_us;
 static struct {
     bool active;
     uint8_t type, seq;
+    uint32_t conn;                    /* どの接続の要求か（応答はその接続にだけ返す） */
     int64_t t0;
 } s_pend;
+
+/* カードの状態がどの接続のものか（ccid タスク）。s_card_fresh と s_blocked は ccidh_attach でも書く */
+static volatile bool s_card_fresh;    /* 列挙し直したばかりで、まだどの接続も使っていない */
+static volatile bool s_blocked;       /* リセットできなかった。再列挙まで「カードなし」で答える */
+static uint32_t s_card_conn;
+static uint8_t s_own_seq;
+static void (*s_bus_reset)(void);
 
 static inline void kick(void)
 {
@@ -219,6 +235,8 @@ bool ccidh_attach(usb_host_client_handle_t client, usb_device_handle_t dev, cons
     c.mps = mps;
     s_up_len = 0;
     s_up_discard = false;
+    s_card_fresh = true;              /* 列挙し直したカードは、前の PIN の状態を持っていない */
+    s_blocked = false;
     c.xout->device_handle = dev;
     c.xout->bEndpointAddress = ep_out;
     c.xout->callback = out_cb;
@@ -311,14 +329,81 @@ static esp_err_t write_key(const uint8_t *m, size_t n)
     return err;
 }
 
-static void handle_req(const uint8_t *m, size_t n)
+/* 自分で作った PowerOff / PowerOn を YubiKey に送り、その応答を待つ（ccid タスク） */
+static bool card_power(uint8_t type)
 {
+    uint8_t req[YD_CCID_HDR];
+    yd_ccid_make_power_req(type, s_own_seq++, req);
+    esp_err_t err = write_key(req, sizeof(req));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, YD_L("Card reset: write of %s failed (%s)", "カードのリセット: %s の書き込みに失敗 (%s)"), type_name(type), esp_err_to_name(err));
+        return false;
+    }
+    int64_t deadline = esp_timer_get_time() + (int64_t)POWER_TIMEOUT_MS * 1000;
+    for (;;) {
+        int64_t left_ms = (deadline - esp_timer_get_time()) / 1000;
+        if (left_ms <= 0) {
+            ESP_LOGW(TAG, YD_L("Card reset: no response to %s", "カードのリセット: %s に応答がない"), type_name(type));
+            return false;
+        }
+        size_t n = xMessageBufferReceive(s_up_mb, s_rsp, sizeof(s_rsp), pdMS_TO_TICKS(left_ms) + 1);
+        if (n == 0) {
+            continue;
+        }
+        switch (yd_ccid_power_resp(req, s_rsp, n)) {
+        case YD_CCID_POWER_OK:
+            return true;
+        case YD_CCID_POWER_FAIL:
+            ESP_LOGW(TAG, YD_L("Card reset: %s refused (status=0x%02x err=0x%02x)", "カードのリセット: %s が拒否された (status=0x%02x err=0x%02x)"),
+                     type_name(type), s_rsp[7], s_rsp[8]);
+            return false;
+        case YD_CCID_POWER_WAIT:
+            break;                    /* 時間延長、前の接続の要求への遅れた応答（捨てる） */
+        }
+    }
+}
+
+/* conn の要求を通す前に、カードの状態を conn のものにする（ccid タスク）。前の接続が PIN を確かめていても、
+ * 新しい接続はそれを使えない */
+static void card_take(uint32_t conn)
+{
+    if (s_card_fresh) {
+        s_card_fresh = false;
+        s_card_conn = conn;
+        return;
+    }
+    if (s_blocked || s_card_conn == conn) {
+        return;
+    }
+    s_pend.active = false;            /* 前の接続の要求への応答は返さない */
+    ESP_LOGI(TAG, YD_L("New connection from the receiver: resetting the card (PowerOff / PowerOn)", "レシーバーとの新しい接続: カードをリセットします（PowerOff / PowerOn）"));
+    if (card_power(CCID_PC_POWER_OFF) && card_power(CCID_PC_POWER_ON)) {
+        s_card_conn = conn;
+        return;
+    }
+    s_blocked = true;
+    ESP_LOGW(TAG, YD_L("Could not reset the card: answering \"no card\" until the key's USB bus has been restarted",
+                       "カードをリセットできませんでした。YubiKey の USB バスを止めて再開するまで「カードなし」で応答します"));
+    if (s_bus_reset) {
+        s_bus_reset();
+    }
+}
+
+static void handle_req(const uint8_t *m, size_t n, uint32_t conn)
+{
+    if (conn != yd_link_conn_id()) {
+        ESP_LOGW(TAG, YD_L("Dropping a request from a closed connection", "切れた接続からの要求を破棄"));
+        return;                       /* 返す相手がいない。新しい接続に流さない */
+    }
     if (!yd_ccid_valid(m, n)) {
         ESP_LOGW(TAG, YD_L("Dropping malformed request (len=%u)", "形式不正の要求を破棄 (len=%u)"), (unsigned)n);
         return;
     }
     s_last_us = esp_timer_get_time();
-    if (!c.attached) {
+    if (c.attached) {
+        card_take(conn);
+    }
+    if (!c.attached || s_blocked) {
         ESP_LOGW(TAG, YD_L("%s received but CCID is unavailable: replying \"no card\"", "%s が届いたがCCIDが使えないので「カードなし」で応答"), type_name(m[0]));
         reply_absent(m);
         return;
@@ -326,6 +411,7 @@ static void handle_req(const uint8_t *m, size_t n)
     s_pend.active = true;
     s_pend.type = m[0];
     s_pend.seq = m[6];
+    s_pend.conn = conn;
     s_pend.t0 = esp_timer_get_time();
     esp_err_t err = write_key(m, n);
     if (err != ESP_OK) {
@@ -340,6 +426,10 @@ static void handle_req(const uint8_t *m, size_t n)
 static void handle_rsp(const uint8_t *m, size_t n)
 {
     s_last_us = esp_timer_get_time();
+    if (!s_pend.active || s_pend.conn != yd_link_conn_id()) {
+        ESP_LOGW(TAG, YD_L("Dropping a response from the key with no request on this connection (seq=%u)", "この接続の要求がない YubiKey の応答を破棄 (seq=%u)"), m[6]);
+        return;                       /* 切れた接続の要求への応答（タッチ待ちだった署名など）を新しい接続に返さない */
+    }
     bool te = (m[7] & 0xC0) == CCID_CMD_TIME_EXT;
     if (te) {
         static int64_t last_te_log;
@@ -348,7 +438,7 @@ static void handle_rsp(const uint8_t *m, size_t n)
             ESP_LOGI(TAG, YD_L("Key→host time extension (waiting for touch etc.) seq=%u", "Key→Mac 時間延長（タッチ待ちなど）seq=%u"), m[6]);
         }
     } else {
-        int64_t ms = (s_pend.active && s_pend.seq == m[6]) ? (s_last_us - s_pend.t0) / 1000 : -1;
+        int64_t ms = (s_pend.seq == m[6]) ? (s_last_us - s_pend.t0) / 1000 : -1;
         ESP_LOGI(TAG, YD_L("Key→host 0x%02x seq=%u len=%u status=0x%02x err=0x%02x (%lldms)", "Key→Mac 0x%02x seq=%u len=%u status=0x%02x err=0x%02x（%lldms）"),
                  m[0], m[6], (unsigned)(n - YD_CCID_HDR), m[7], m[8], ms);
         s_pend.active = false;
@@ -369,8 +459,10 @@ static void ccid_task(void *arg)
                 handle_rsp(s_rsp, n);
                 any = true;
             }
-            if ((n = xMessageBufferReceive(s_down_mb, s_req, sizeof(s_req), 0)) > 0) {
-                handle_req(s_req, n);
+            if ((n = xMessageBufferReceive(s_down_mb, s_req, sizeof(s_req), 0)) > CONN_TAG) {
+                uint32_t conn;
+                memcpy(&conn, s_req, CONN_TAG);
+                handle_req(s_req + CONN_TAG, n - CONN_TAG, conn);
                 any = true;
             }
         } while (any);
@@ -379,22 +471,30 @@ static void ccid_task(void *arg)
 
 void ccidh_from_link(const uint8_t *data, uint16_t len)
 {
+    uint32_t conn = yd_link_conn_id();
+    if (conn != s_down_conn) {
+        s_down_conn = conn;
+        yd_frag_rx_reset(&s_down_rx);  /* 前の接続で組み立て途中だった分は捨てる */
+    }
     int n = yd_frag_rx_feed(&s_down_rx, data, len);
     if (n < 0) {
         ESP_LOGW(TAG, YD_L("Request from the receiver was incomplete: dropped", "レシーバーからの要求が欠けていたので破棄"));
         return;
     }
     if (n > 0) {
-        if (xMessageBufferSend(s_down_mb, s_down_asm, n, pdMS_TO_TICKS(200)) != (size_t)n) {
+        memcpy(s_down_asm, &conn, CONN_TAG);
+        if (xMessageBufferSend(s_down_mb, s_down_asm, CONN_TAG + n, pdMS_TO_TICKS(200)) != (size_t)(CONN_TAG + n)) {
             ESP_LOGW(TAG, YD_L("Request queue full: dropped", "要求キューが一杯のため破棄"));
         }
         kick();
     }
 }
 
-void ccidh_init(void)
+void ccidh_init(void (*bus_reset)(void))
 {
-    yd_frag_rx_init(&s_down_rx, s_down_asm, sizeof(s_down_asm));
+    s_bus_reset = bus_reset;
+    yd_frag_rx_init(&s_down_rx, s_down_asm + CONN_TAG, YD_CCID_BUF);
+    s_down_conn = yd_link_conn_id();
     c.out_done = xSemaphoreCreateBinary();
     c.mutex = xSemaphoreCreateMutex();
     s_down_mb = xMessageBufferCreate(MB_SIZE);

@@ -174,6 +174,11 @@ bool yd_link_is_up(void)
     return (s_transport == YD_LINK_UART) ? true : ydl_ble_is_up();
 }
 
+uint32_t yd_link_conn_id(void)
+{
+    return (s_transport == YD_LINK_UART) ? 0 : ydl_ble_conn_id();
+}
+
 esp_err_t yd_link_forget_peers(void)
 {
     return (s_transport == YD_LINK_UART) ? ESP_OK : ydl_ble_forget_peers();

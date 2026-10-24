@@ -94,6 +94,10 @@ uint16_t yd_link_max_payload(void);
 /* 送受信できる状態か（UARTは常にtrue） */
 bool yd_link_is_up(void);
 
+/* 接続の番号。BLE はつながるたび・切れるたびに変わる（UART は常に 0）。rx_cb の中で呼ぶと、そのデータが届いた
+ * 接続の番号。state_cb は途中の変化を飛ばすことがあるので、接続をまたいで状態を持ち越したくないときはこれで見分ける */
+uint32_t yd_link_conn_id(void);
+
 /* BLE: 保存済みのペアリング情報をすべて消す（相手を変えたいとき） */
 esp_err_t yd_link_forget_peers(void);
 

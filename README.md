@@ -94,7 +94,8 @@ docs/                   build guide (English / Japanese), images
   requested from pid.codes now that the project is public.
 - Only the USB-A key variant has a case. A USB-C key variant and a battery-powered desk unit are planned.
 - One request at a time per interface (same as the key itself). If the BLE link drops, the computer sees
-  the smart card being removed, and PIN state is lost.
+  the smart card being removed, and PIN state is lost: before a new connection's first smart card request
+  reaches the key, the desk unit power-cycles the card (or, if the key refuses, restarts the key's USB bus).
 - Serial log messages are in English by default. Japanese can be selected in `idf.py menuconfig` →
   KeyRelay log language.
 - Secure boot, flash encryption and NVS encryption are not set up by default. The procedure in

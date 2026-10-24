@@ -15,12 +15,15 @@ test_otp_batch: test_otp_batch.c ../../desk_unit/main/otp_batch.h
 	$(CC) $(CFLAGS) -I ../../desk_unit/main -o $@ test_otp_batch.c
 test_kbd_filter: test_kbd_filter.c ../../receiver/main/kbd_filter.h
 	$(CC) $(CFLAGS) -I ../../receiver/main -o $@ test_kbd_filter.c
-test: test_frag test_sec test_bond_policy test_otp_batch test_kbd_filter
+test_ccid_power: test_ccid_power.c $(LINK)/include/yd_ccid.h
+	$(CC) $(CFLAGS) -I $(LINK)/include -o $@ test_ccid_power.c
+test: test_frag test_sec test_bond_policy test_otp_batch test_kbd_filter test_ccid_power
 	./test_frag
 	./test_sec
 	./test_bond_policy
 	./test_otp_batch
 	./test_kbd_filter
+	./test_ccid_power
 clean:
-	rm -f test_frag test_sec test_bond_policy test_otp_batch test_kbd_filter
+	rm -f test_frag test_sec test_bond_policy test_otp_batch test_kbd_filter test_ccid_power
 .PHONY: all test clean

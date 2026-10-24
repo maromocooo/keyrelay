@@ -122,6 +122,7 @@ typedef enum {
     APP_EV_NEW_DEV,
     APP_EV_DEV_GONE,
     APP_EV_RESUME_REQ,     /* fido_tx: YubiKeyが必要なのでバスを起こしてほしい */
+    APP_EV_CARD_RESET,     /* ccid: つなぎ直したレシーバーのためにカードをリセットできなかった。バスを止めて再列挙させる */
 } app_ev_type_t;
 
 typedef struct {
@@ -1163,6 +1164,11 @@ static void close_device(void)
     }
     portEXIT_CRITICAL(&s_lock);
 
+    /* 処理中のトランザクションがあるのは、取り外しか、カードのリセットのために止めたとき（bus_suspend の force） */
+    for (int i = 0; i < ndead; i++) {
+        ESP_LOGW(TAG, YD_L("Returning an error to in-flight vCID=%08", "処理中だった vCID=%08") PRIx32 YD_L("", " にエラーを返します"), dead[i]);
+        send_ctaphid_error(dead[i], CTAPHID_ERR_OTHER);
+    }
     if (deliberate) {
         ESP_LOGI(TAG, YD_L("Key suspended (intentional, so the receiver is not told the key was removed; CCID is unavailable while suspended)", "YubiKeyをサスペンドしました（意図的な停止なので、レシーバーには取り外しを通知しません。CCIDは使えなくなります）"));
         report_key_state();
@@ -1174,10 +1180,6 @@ static void close_device(void)
         s_has_fido = false;
         report_key_state();
     }
-    for (int i = 0; i < ndead; i++) {
-        ESP_LOGW(TAG, YD_L("Returning an error to in-flight vCID=%08", "処理中だった vCID=%08") PRIx32 YD_L("", " にエラーを返します"), dead[i]);
-        send_ctaphid_error(dead[i], CTAPHID_ERR_OTHER);
-    }
 }
 
 /* ======================================================================
@@ -1186,12 +1188,13 @@ static void close_device(void)
 static int64_t s_suspend_t0, s_resume_t0, s_resume_deadline, s_manual_hold_until;
 static bool s_resume_pending;
 
-static void bus_suspend(const char *why, bool require_idle)
+/* force: カードのリセットのため。FIDO を掴めていなくても、処理中のトランザクションがあっても止める */
+static void bus_suspend(const char *why, bool require_idle, bool force)
 {
-    if (s_bus_state != BUS_ACTIVE || !is_ready()) {
+    if (s_bus_state != BUS_ACTIVE || !(force ? k.dev != NULL : is_ready())) {
         return;
     }
-    if (xSemaphoreTake(s_bus_mutex, 0) != pdTRUE) {
+    if (xSemaphoreTake(s_bus_mutex, force ? portMAX_DELAY : 0) != pdTRUE) {
         return;   /* fido_tx が書き込み中。次の周期でまた判定する */
     }
     /* 判定してからミューテックスを取るまでの間に要求が転送されていないか、取ってから確認し直す */
@@ -1200,8 +1203,8 @@ static void bus_suspend(const char *why, bool require_idle)
     bool busy = any_busy_locked(t);
     int64_t idle = t - s_last_activity_us;
     portEXIT_CRITICAL(&s_lock);
-    if (busy || uxQueueMessagesWaiting(s_m2k_q) > 0 ||
-        (require_idle && idle < (int64_t)IDLE_SUSPEND_MS * 1000)) {
+    if (!force && (busy || uxQueueMessagesWaiting(s_m2k_q) > 0 ||
+                   (require_idle && idle < (int64_t)IDLE_SUSPEND_MS * 1000))) {
         xSemaphoreGive(s_bus_mutex);
         return;
     }
@@ -1258,6 +1261,29 @@ static void bus_resume(const char *why)
     s_resume_t0 = now_us();
     s_resume_deadline = s_resume_t0 + (int64_t)RESUME_TIMEOUT_MS * 1000;
     ESP_LOGI(TAG, YD_L("▶ USB bus resumed (%s). Waiting for the key to re-enumerate", "▶ USBバス再開（%s）。YubiKeyの再認識を待ちます"), why);
+}
+
+/* ccid_host がカードをリセットできなかった（app_main で）。バスを止めて、すぐ再開させる。再列挙でカードは
+ * リセットされる。止まっている・止めている途中・再列挙待ちなら、どのみち再列挙になるので何もしない */
+static void handle_card_reset(void)
+{
+    if (s_bus_state != BUS_ACTIVE || !k.dev) {
+        return;
+    }
+    bus_suspend(YD_L("card reset", "カードのリセット"), false, true);
+    if (s_bus_state == BUS_SUSPENDING) {
+        s_resume_pending = true;
+    } else {
+        ESP_LOGE(TAG, YD_L("Could not restart the key's USB bus: CCID stays unavailable until the key is replugged",
+                           "YubiKey の USB バスを止められませんでした。挿し直すまで CCID は使えません"));
+    }
+}
+
+/* ccid タスクから */
+static void request_card_reset(void)
+{
+    app_ev_t ev = { .type = APP_EV_CARD_RESET };
+    xQueueSend(s_app_q, &ev, portMAX_DELAY);
 }
 
 static void handle_resume_req(void)
@@ -1441,7 +1467,7 @@ void app_main(void)
     ESP_ERROR_CHECK(usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + 248, 0, &k.xfer_ctrl));
 
     xTaskCreatePinnedToCore(fido_tx_task, "fido_tx", 4096, NULL, 8, NULL, 0);
-    ccidh_init();
+    ccidh_init(request_card_reset);
     otph_init();
 #if YD_UART_DOWNLOAD_CMD
     xTaskCreate(console_task, "console", 3072, NULL, 2, NULL);
@@ -1491,6 +1517,9 @@ void app_main(void)
             case APP_EV_RESUME_REQ:
                 handle_resume_req();
                 break;
+            case APP_EV_CARD_RESET:
+                handle_card_reset();
+                break;
             }
         }
         int64_t t = now_us();
@@ -1535,7 +1564,7 @@ void app_main(void)
             portEXIT_CRITICAL(&s_lock);
             int64_t ccid_idle = t - ccidh_last_activity_us();
             if (!busy && idle >= (int64_t)IDLE_SUSPEND_MS * 1000 && ccid_idle >= (int64_t)IDLE_SUSPEND_MS * 1000) {
-                bus_suspend(YD_L("idle", "無通信"), true);
+                bus_suspend(YD_L("idle", "無通信"), true, false);
             }
         }
 
@@ -1553,7 +1582,7 @@ void app_main(void)
                 ESP_LOGW(TAG, YD_L("Pairing data erased. Erase the receiver's pairing too, then restart both units", "ペアリング情報を消去しました。レシーバー側も消去してから、両方を再起動してください"));
             } else if (s_bus_state == BUS_ACTIVE && is_ready()) {
                 s_manual_hold_until = 0;
-                bus_suspend(YD_L("BOOT button", "BOOTボタン"), false);
+                bus_suspend(YD_L("BOOT button", "BOOTボタン"), false, false);
                 if (s_bus_state == BUS_SUSPENDING) {
                     ESP_LOGI(TAG, YD_L("[current measurement] the current shortly after this is the suspend current", "[電流測定] まもなくの電流値が『サスペンド電流』です"));
                 } else {

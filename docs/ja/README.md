@@ -81,7 +81,8 @@ idf.py -C firmware/desk_unit set-target esp32s3 build merge-bin -o keyrelay_desk
   公開したので、pid.codes に専用の PID を申請する予定です。
 - ケースは USB-A キー用だけです。USB-C キー版と電池版の机上ユニットは今後。
 - 要求は同時に1つずつ（キー自体と同じ）。BLE が切れるとパソコンからはカードを抜いたように見え、
-  PIN 入力済みの状態は消えます。
+  PIN 入力済みの状態は消えます。新しい接続のスマートカードの要求をキーに渡す前に、机上ユニットがカードの
+  電源を入れ直します（キーが応じなければ、キーの USB バスを止めて再開します）。
 - シリアルのログは、既定では英語です。`idf.py menuconfig` → KeyRelay log language で日本語にできます。
 - セキュアブート・フラッシュ暗号化・NVS 暗号化は、既定では設定していません。手順は
   [HARDENING.md](HARDENING.md) にあります（レシーバーの実機で確認済み。机上ユニットはまだ）。
