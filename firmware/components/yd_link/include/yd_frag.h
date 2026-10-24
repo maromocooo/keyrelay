@@ -38,8 +38,9 @@ void yd_frag_rx_reset(yd_frag_rx_t *r);
 /* 1片を与える。戻り値: 完成したメッセージの長さ（r->buf に入っている）/ 0 = 途中 / -1 = 壊れていたので破棄 */
 int yd_frag_rx_feed(yd_frag_rx_t *r, const uint8_t *p, uint16_t n);
 
-/* msg を分割して ch に送る。複数タスクから呼んでも片が混ざらない */
-esp_err_t yd_frag_send(uint8_t ch, const uint8_t *msg, size_t len);
+/* msg を分割して ch に送る。複数タスクから呼んでも片が混ざらない。すべての片を conn（yd_link_conn_id() の値）の
+ * 接続に送り、途中で切れたら残りは送らない（次の接続にメッセージの後半だけ、または別の接続あての中身を渡さない） */
+esp_err_t yd_frag_send(uint32_t conn, uint8_t ch, const uint8_t *msg, size_t len);
 
 /* yd_link_init から呼ばれる */
 void yd_frag_init(void);

@@ -293,19 +293,20 @@ int64_t ccidh_last_activity_us(void)
 /* ======================================================================
  *  ccid タスク
  * ====================================================================== */
-static void reply(const uint8_t *m, size_t n)
+/* conn の接続に返す。その接続がもう切れていれば（送っている途中で切れても）新しい接続には送らない */
+static void reply(uint32_t conn, const uint8_t *m, size_t n)
 {
-    esp_err_t err = yd_frag_send(YD_CH_CCID, m, n);
+    esp_err_t err = yd_frag_send(conn, YD_CH_CCID, m, n);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, YD_L("Failed to send the response to the receiver: %s", "レシーバーへの応答送信に失敗: %s"), esp_err_to_name(err));
     }
 }
 
-static void reply_absent(const uint8_t *req)
+static void reply_absent(uint32_t conn, const uint8_t *req)
 {
     uint8_t r[YD_CCID_HDR];
     yd_ccid_make_absent_resp(req, r);
-    reply(r, sizeof(r));
+    reply(conn, r, sizeof(r));
 }
 
 static esp_err_t write_key(const uint8_t *m, size_t n)
@@ -405,7 +406,7 @@ static void handle_req(const uint8_t *m, size_t n, uint32_t conn)
     }
     if (!c.attached || s_blocked) {
         ESP_LOGW(TAG, YD_L("%s received but CCID is unavailable: replying \"no card\"", "%s が届いたがCCIDが使えないので「カードなし」で応答"), type_name(m[0]));
-        reply_absent(m);
+        reply_absent(conn, m);
         return;
     }
     s_pend.active = true;
@@ -417,7 +418,7 @@ static void handle_req(const uint8_t *m, size_t n, uint32_t conn)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, YD_L("Write to the key failed (%s). %s seq=%u", "YubiKeyへの書き込み失敗 (%s)。%s seq=%u"), esp_err_to_name(err), type_name(m[0]), m[6]);
         s_pend.active = false;
-        reply_absent(m);
+        reply_absent(conn, m);
         return;
     }
     ESP_LOGI(TAG, YD_L("Host→key %s seq=%u len=%u", "Mac→Key %s seq=%u len=%u"), type_name(m[0]), m[6], (unsigned)(n - YD_CCID_HDR));
@@ -443,7 +444,7 @@ static void handle_rsp(const uint8_t *m, size_t n)
                  m[0], m[6], (unsigned)(n - YD_CCID_HDR), m[7], m[8], ms);
         s_pend.active = false;
     }
-    reply(m, n);
+    reply(s_pend.conn, m, n);
 }
 
 static void ccid_task(void *arg)
