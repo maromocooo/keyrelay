@@ -6,12 +6,14 @@
  *   応答（RDR_to_PC）の [7] = bStatus, [8] = bError
  *
  * KeyRelay は中身（APDU）を解釈せず、メッセージ単位で YubiKey とそのまま中継する。
- * ここにあるのは「YubiKey に届けられないときに自分で返すエラー応答」を作るためのもの。
+ * ここにあるのは「YubiKey に届けられないときに自分で返すエラー応答」と、接続が切れたときに
+ * 机上ユニットが自分でカードの電源を入れ直すためのもの。
  */
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <string.h>
 
 #define YD_CCID_HDR            10
 #define YD_CCID_MAX_MSG        3072        /* dwMaxCCIDMessageLength（YubiKey 5 と同じ。ヘッダー込み） */
@@ -117,6 +119,35 @@ static inline size_t yd_ccid_make_absent_resp(const uint8_t *req, uint8_t out[YD
     default:
         return yd_ccid_make_resp(req, CCID_CMD_FAILED | CCID_ICC_ABSENT, CCID_ERR_CMD_NOT_SUPPORTED, out);
     }
+}
+
+/* 机上ユニットが自分で YubiKey に送る PowerOff / PowerOn（レシーバーとの接続が切れたときのカードのリセット） */
+static inline size_t yd_ccid_make_power_req(uint8_t type, uint8_t seq, uint8_t out[YD_CCID_HDR])
+{
+    memset(out, 0, YD_CCID_HDR);   /* dwLength = 0、bSlot = 0、PowerOn の bPowerSelect = 0（自動） */
+    out[0] = type;
+    out[6] = seq;
+    return YD_CCID_HDR;
+}
+
+typedef enum {
+    YD_CCID_POWER_WAIT,    /* この要求への最終応答ではない（時間延長、前の要求への遅れた応答） */
+    YD_CCID_POWER_OK,
+    YD_CCID_POWER_FAIL,
+} yd_ccid_power_t;
+
+/* yd_ccid_make_power_req で作った req への応答として rsp を見る */
+static inline yd_ccid_power_t yd_ccid_power_resp(const uint8_t *req, const uint8_t *rsp, size_t n)
+{
+    if (n < YD_CCID_HDR || rsp[6] != req[6] || (rsp[7] & 0xC0) == CCID_CMD_TIME_EXT) {
+        return YD_CCID_POWER_WAIT;
+    }
+    if (rsp[0] != yd_ccid_resp_type(req[0]) || (rsp[7] & 0xC0) != CCID_CMD_OK) {
+        return YD_CCID_POWER_FAIL;
+    }
+    /* PowerOn のあとはカードが動いていること。PowerOff のあとは止まっていること（いないのは失敗） */
+    uint8_t icc = rsp[7] & 0x03;
+    return icc == (req[0] == CCID_PC_POWER_ON ? CCID_ICC_ACTIVE : CCID_ICC_INACTIVE) ? YD_CCID_POWER_OK : YD_CCID_POWER_FAIL;
 }
 
 /* PC から届いたメッセージとして形が正しいか（長さがヘッダーと一致するか） */

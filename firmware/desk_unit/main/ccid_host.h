@@ -7,7 +7,9 @@
 #include <stdint.h>
 #include "usb/usb_host.h"
 
-void ccidh_init(void);
+/* bus_reset: レシーバーとつなぎ直したときにカードをリセットできなかったら（ccid タスクから）呼ぶ。
+ * YubiKey を列挙し直させる（ccidh_attach が呼ばれるまで「カードなし」で答える） */
+void ccidh_init(void (*bus_reset)(void));
 
 /* open_device から（s_bus_mutex を持って）。itf_offset は usb_parse_next_descriptor_of_type が返した位置 */
 bool ccidh_attach(usb_host_client_handle_t client, usb_device_handle_t dev, const usb_config_desc_t *cd,

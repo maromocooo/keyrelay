@@ -367,6 +367,7 @@ static uint32_t s_hs_timer_gen, s_conn_timer_gen;
 static int64_t s_hs_timer_due_us, s_conn_timer_due_us;
 static uint32_t s_hs_gen;                    /* ハンドシェイクの状態（上の s_hs_* と鍵）がどの世代のものか（rx_task だけが触る） */
 static uint16_t s_hs_conn;                   /* その接続のハンドル */
+static TaskHandle_t s_rx_task;
 static uint32_t s_sec_fail;
 
 /* 接続した（ホストタスク）。新しい世代を始め、接続ごとの状態を初期値に戻す */
@@ -1026,6 +1027,12 @@ bool ydl_ble_is_up(void)
     return s_up;
 }
 
+uint32_t ydl_ble_conn_id(void)
+{
+    /* rx_task（rx_cb の中）では、いま渡しているデータの接続。s_gen はもう次に進んでいることがある */
+    return xTaskGetCurrentTaskHandle() == s_rx_task ? s_hs_gen : s_gen;
+}
+
 esp_err_t ydl_ble_forget_peers(void)
 {
     ble_store_clear();
@@ -1597,7 +1604,7 @@ esp_err_t ydl_ble_init(const yd_link_config_t *cfg)
     s_txq = xQueueCreate(TXQ_DEPTH, sizeof(pkt_t));
     s_rxq = xQueueCreate(RXQ_DEPTH, sizeof(pkt_t));
     ESP_RETURN_ON_FALSE(s_txq && s_rxq, ESP_ERR_NO_MEM, TAG, "queue");
-    xTaskCreate(rx_task, "yd_ble_rx", 8192, NULL, 12, NULL);   /* X25519（mbedtls）の分も余裕を持たせる */
+    xTaskCreate(rx_task, "yd_ble_rx", 8192, NULL, 12, &s_rx_task);   /* X25519（mbedtls）の分も余裕を持たせる */
     xTaskCreate(tx_task, "yd_ble_tx", 4096, NULL, 12, NULL);
 
     if (s_is_central) {
