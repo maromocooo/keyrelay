@@ -177,6 +177,31 @@ int main(void)
     f.bad = true;
     CHECK(kbdf_key(&f, zero, t) == 0, "a release report is never blocked");
 
+    /* the receiver's queue is full and it drops letters the filter already counted: once the queue drains,
+     * an Enter in the same burst must not be typed on the strength of letters nobody saw */
+    kbdf_init(&f);
+    t += 3000;
+    otp(s, 44);
+    CHECK(type(&f, s, 1, &t, 0) == 45, "an OTP and Enter are typed");
+    for (int i = 0; i < 32; i++) {
+        uint8_t r[8] = { 0, 0, usage_of('c') };
+        if (kbdf_key(&f, r, t += 2) > 0) {
+            kbdf_drop(&f);              /* what hid_dev.c does when the queue has no room */
+        }
+    }
+    CHECK(kbdf_key(&f, en, t += 2) == KBDF_BLOCKED, "after dropped letters, an Enter in the same burst is blocked");
+    CHECK(type(&f, "cd", 1, &t, 0) == 0, "and so are the letters and Enter that follow without a pause");
+    t += 3000;
+    otp(s, 44);
+    CHECK(type(&f, s, 1, &t, 0) == 45, "after a pause the next OTP is typed again");
+    kbdf_init(&f);
+    t += 3000;
+    otp(s, 40);
+    type(&f, s, 0, &t, 0);
+    CHECK(kbdf_key(&f, en, t += 2) == KBDF_KEY_ENTER, "an Enter after 40 letters is typed");
+    kbdf_drop(&f);                      /* ...but the queue had no room for it */
+    CHECK(type(&f, "c", 1, &t, 0) == 0, "a dropped Enter spoils the rest of the burst too");
+
     /* Enter together with a letter in one report is not an OTP */
     kbdf_init(&f);
     t += 3000;

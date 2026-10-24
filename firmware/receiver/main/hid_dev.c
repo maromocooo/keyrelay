@@ -537,9 +537,11 @@ void hid_dev_kbd_from_link(const uint8_t *data, uint16_t len)
             continue;                   /* 「離す」はこちらで送るので、机上ユニットの分は使わない */
         }
         /* 1文字を「押す」「全部離す」の2つで打つ。2つとも入らないなら、押すほうも入れない。
-         * rx_task（BLE 受信）を止めないように待たない */
+         * rx_task（BLE 受信）を止めないように待たない。捨てた文字もフィルターは数えているので、
+         * このまとまりは間が空くまで打たない（空いてから Enter だけが通らないように） */
         if (uxQueueSpacesAvailable(s_kbd_q) < 2) {
             ESP_LOGW(TAG, YD_L("Keyboard queue full: input dropped", "キーボードのキューが一杯。入力を破棄"));
+            kbdf_drop(&f);
             break;
         }
         kbd_rep_t press = { .d = { 0, 0, (uint8_t)key } }, up = { 0 };
