@@ -504,7 +504,7 @@ static void ctl_task(void *arg)
             int64_t t = now_ms();
             if (t - last_log > 3000) {
                 last_log = t;
-                ESP_LOGI(TAG, YD_L("Relaying feature reports (challenge-response / slot configuration), total %lu", "フィーチャーレポート中継中（チャレンジレスポンス / スロット設定）累計 %lu 回"),
+                ESP_LOGI(TAG, YD_L("Relaying feature reports (challenge-response), total %lu", "フィーチャーレポート中継中（チャレンジレスポンス）累計 %lu 回"),
                          (unsigned long)s_ctl_count);
             }
         }
