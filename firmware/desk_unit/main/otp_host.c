@@ -19,7 +19,8 @@
  * ---- フィーチャーレポート（v7） ----
  * チャレンジレスポンス（KeePassXC など）やスロット設定（ykman otp）は、キーボードの口への
  * GET_REPORT / SET_REPORT（Feature, 8バイト）で行う。レシーバーが Mac から受けた要求を1つずつ送ってくるので、
- * 制御転送でそのまま YubiKey に出し、GET の結果を返す（中身は解釈しない）。
+ * 制御転送でそのまま YubiKey に出し、GET の結果を返す。ただし SET は、キーを書き換えるコマンド（スロットの設定など）
+ * を止める（otp_ctl_filter.h）。KeyRelay 越しにはスロットを設定できない。
  */
 #include <string.h>
 #include <inttypes.h>
@@ -32,6 +33,7 @@
 #include "yd_link.h"
 #include "otp_host.h"
 #include "otp_batch.h"
+#include "otp_ctl_filter.h"
 #include "yd_lang.h"
 
 static const char *TAG = "otp";
@@ -312,8 +314,13 @@ static void ctl_task(void *arg)
     for (;;) {
         xQueueReceive(s_ctl_q, &r, portMAX_DELAY);
         xSemaphoreTake(s_ctl_mutex, portMAX_DELAY);
-        bool ok;
-        if (r.op == YD_OTPCTL_SET) {
+        bool ok = false;
+        uint8_t cmd;
+        if (r.op == YD_OTPCTL_SET && !otpcf_set_allowed(r.d, &cmd)) {
+            ESP_LOGW(TAG, YD_L("Blocked an OTP command that would change the key (0x%02x seq byte 0x%02x). Configure slots with the key plugged into a computer",
+                               "キーを書き換える OTP のコマンドを止めました（0x%02x、番号のバイト 0x%02x）。スロットの設定は YubiKey をパソコンに直接挿して行ってください"),
+                     cmd, r.d[YD_OTPCTL_REPORT_LEN - 1]);
+        } else if (r.op == YD_OTPCTL_SET) {
             ok = ctl_xfer(false, r.d);
             if (!ok) {
                 ESP_LOGW(TAG, YD_L("SET_REPORT(Feature) failed", "SET_REPORT(Feature) 失敗"));
