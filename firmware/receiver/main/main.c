@@ -168,9 +168,10 @@ static void link_rx(uint8_t ch, const uint8_t *data, uint16_t len, void *arg)
             hid_dev_set_otp_caps(YD_KBD_ENABLED && (caps & YD_KEY_CAP_OTP) != 0, (caps & YD_KEY_CAP_OTPCTL) != 0);
             if (!YD_KBD_ENABLED) {
                 ESP_LOGI(TAG, YD_L("  OTP keyboard disabled in this build (CONFIG_YD_OTP_KEYBOARD=n): touch OTPs are not typed", "  OTP キーボードは無効のビルド（CONFIG_YD_OTP_KEYBOARD=n）。タッチでの OTP 入力はしません"));
+            } else if ((caps & YD_KEY_CAP_OTP) && (caps & YD_KEY_CAP_OTPCTL)) {
+                ESP_LOGI(TAG, YD_L("  Relaying OTP (keyboard) too (plus challenge-response)", "  OTP（キーボード）も中継します（チャレンジレスポンスも）"));
             } else if (caps & YD_KEY_CAP_OTP) {
-                ESP_LOGI(TAG, YD_L("  Relaying OTP (keyboard) too%s", "  OTP（キーボード）も中継します%s"),
-                         (caps & YD_KEY_CAP_OTPCTL) ? YD_L(" (plus challenge-response and slot configuration)", "（チャレンジレスポンス・スロット設定も）") : "");
+                ESP_LOGI(TAG, YD_L("  Relaying OTP (keyboard) too", "  OTP（キーボード）も中継します"));
             }
             break;
         }

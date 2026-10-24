@@ -17,11 +17,11 @@
  *   YD_CH_OTP のペイロード = レポート(8バイト) × rpp（MTU から決まる。247 なら 24）
  *
  * ---- フィーチャーレポート（v7） ----
- * チャレンジレスポンス（KeePassXC など）やスロット設定（ykman otp）は、キーボードの口への
- * GET_REPORT / SET_REPORT（Feature, 8バイト）で行う。レシーバーが Mac から受けた要求を1つずつ送ってくるので、
- * 制御転送でそのまま YubiKey に出し、GET の結果を返す。ただし SET は、キーを書き換えるコマンド（スロットの設定など）
- * を止める（otp_ctl_filter.h）。KeyRelay 越しにはスロットを設定できない。要求は届いた接続のもので、切れた接続の
- * 要求は出さず、GET の結果はその接続にだけ返す。
+ * チャレンジレスポンス（KeePassXC など）は、キーボードの口への GET_REPORT / SET_REPORT（Feature, 8バイト）で行う
+ * （スロット設定（ykman otp）も同じ口を使うが、下のとおり止める）。レシーバーが Mac から受けた要求を1つずつ
+ * 送ってくるので、制御転送でそのまま YubiKey に出し、GET の結果を返す。ただし SET は、キーを書き換える
+ * コマンド（スロットの設定など）を止める（otp_ctl_filter.h）。KeyRelay 越しにはスロットを設定できない。要求は
+ * 届いた接続のもので、切れた接続の要求は出さず、GET の結果はその接続にだけ返す。
  */
 #include <string.h>
 #include <inttypes.h>
@@ -342,7 +342,7 @@ static void ctl_task(void *arg)
         int64_t t = esp_timer_get_time();
         if (t - last_log > 3000000) {   /* やり取りが続いている間は3秒に1行 */
             last_log = t;
-            ESP_LOGI(TAG, YD_L("Relaying feature reports (challenge-response / slot configuration), total %", "フィーチャーレポート中継中（チャレンジレスポンス / スロット設定）累計 %") PRIu32 YD_L("", " 回"), s_ctl_count);
+            ESP_LOGI(TAG, YD_L("Relaying feature reports (challenge-response), total %", "フィーチャーレポート中継中（チャレンジレスポンス）累計 %") PRIu32 YD_L("", " 回"), s_ctl_count);
         }
     }
 }

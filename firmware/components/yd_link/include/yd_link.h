@@ -24,7 +24,7 @@ extern "C" {
 /* チャンネル（= YubiKey のUSBインターフェース単位で多重化） */
 #define YD_CH_FIDO   0x01   /* CTAPHID 64バイトレポート（FIDO2/U2F） */
 #define YD_CH_OTP    0x02   /* OTP キーボードの入力レポート（8バイト×N、押す〜離すのまとまり） */
-#define YD_CH_OTPCTL 0x04   /* OTP の HID フィーチャーレポート（チャレンジレスポンス・スロット設定）。下の YD_OTPCTL_* */
+#define YD_CH_OTPCTL 0x04   /* OTP の HID フィーチャーレポート（チャレンジレスポンス。スロット設定は机上ユニットが止める）。下の YD_OTPCTL_* */
 #define YD_CH_CCID   0x03   /* CCID メッセージ（PIV/OpenPGP/OATH）。yd_frag で分割して送る */
 #define YD_CH_CTRL   0x7F   /* 制御メッセージ */
 
