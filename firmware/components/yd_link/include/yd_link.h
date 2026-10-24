@@ -82,6 +82,11 @@ esp_err_t yd_link_init(const yd_link_config_t *cfg);
 /* スレッドセーフ。BLEでは送信キューに積んで即座に返る */
 esp_err_t yd_link_send(uint8_t ch, const uint8_t *data, uint16_t len);
 
+/* yd_link_send と同じだが、conn（yd_link_conn_id() の値）の接続がまだ続いているときだけ送る。切れていれば
+ * ESP_ERR_INVALID_STATE。キューに入れたあとで切れても、次の接続には送らない。ある接続から来た要求への応答を、
+ * 切断・再接続のあとの別の接続に渡さないために使う */
+esp_err_t yd_link_send_on(uint32_t conn, uint8_t ch, const uint8_t *data, uint16_t len);
+
 /* 便利関数: 1バイトの制御メッセージ */
 static inline esp_err_t yd_link_send_ctrl(uint8_t code)
 {

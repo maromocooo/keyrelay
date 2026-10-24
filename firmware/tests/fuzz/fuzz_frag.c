@@ -6,9 +6,9 @@
 #include "yd_link.h"
 #include "yd_frag.h"
 
-esp_err_t yd_link_send(uint8_t ch, const uint8_t *d, uint16_t l)
+esp_err_t yd_link_send_on(uint32_t conn, uint8_t ch, const uint8_t *d, uint16_t l)
 {
-    (void)ch; (void)d; (void)l;
+    (void)conn; (void)ch; (void)d; (void)l;
     return ESP_OK;
 }
 

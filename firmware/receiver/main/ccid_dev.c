@@ -361,7 +361,7 @@ static void handle_host(const uint8_t *m, size_t n, bool card)
         reply_local(m, CCID_CMD_FAILED | CCID_ICC_ACTIVE, CCID_ERR_SLOT_BUSY);
         return;
     }
-    esp_err_t err = yd_frag_send(YD_CH_CCID, m, n);
+    esp_err_t err = yd_frag_send(yd_link_conn_id(), YD_CH_CCID, m, n);
     if (err != ESP_OK) {
         uint8_t r[YD_CCID_HDR];
         yd_ccid_make_absent_resp(m, r);

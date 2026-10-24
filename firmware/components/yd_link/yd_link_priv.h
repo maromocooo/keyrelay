@@ -8,6 +8,7 @@ esp_err_t ydl_uart_send(uint8_t ch, const uint8_t *data, uint16_t len);
 
 esp_err_t ydl_ble_init(const yd_link_config_t *cfg);
 esp_err_t ydl_ble_send(uint8_t ch, const uint8_t *data, uint16_t len);
+esp_err_t ydl_ble_send_on(uint32_t conn, uint8_t ch, const uint8_t *data, uint16_t len);
 bool ydl_ble_is_up(void);
 uint32_t ydl_ble_conn_id(void);
 uint16_t ydl_ble_max_payload(void);

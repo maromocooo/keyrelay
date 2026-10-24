@@ -65,7 +65,7 @@ int yd_frag_rx_feed(yd_frag_rx_t *r, const uint8_t *p, uint16_t n)
     return 0;
 }
 
-esp_err_t yd_frag_send(uint8_t ch, const uint8_t *msg, size_t len)
+esp_err_t yd_frag_send(uint32_t conn, uint8_t ch, const uint8_t *msg, size_t len)
 {
     uint16_t maxp = yd_link_max_payload();
     if (maxp <= YD_FRAG_HDR) {
@@ -92,7 +92,7 @@ esp_err_t yd_frag_send(uint8_t ch, const uint8_t *msg, size_t len)
         memcpy(pkt + YD_FRAG_HDR, msg + off, n);
         /* 送信キューが一杯のときは少し待って再試行（3KB で16片程度なので普通は詰まらない） */
         for (int retry = 0; retry < 20; retry++) {
-            err = yd_link_send(ch, pkt, (uint16_t)(n + YD_FRAG_HDR));
+            err = yd_link_send_on(conn, ch, pkt, (uint16_t)(n + YD_FRAG_HDR));
             if (err != ESP_ERR_TIMEOUT) {
                 break;
             }
