@@ -21,6 +21,7 @@ firmware/tests/host/test_sec
 firmware/tests/host/test_bond_policy
 firmware/tests/host/test_otp_batch
 firmware/tests/host/test_kbd_filter
+firmware/tests/host/test_ccid_power
 firmware/tests/fuzz/fuzz_link_rx
 firmware/tests/fuzz/fuzz_frag
 firmware/tests/fuzz/corpus/
