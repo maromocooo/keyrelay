@@ -57,7 +57,7 @@ cat <<EOF
 
 == Done. Images in $OUT
 First flash (whole unit, see docs/HARDENING.md for the order of eFuse steps):
-  esptool --chip esp32s3 -p PORT --no-stub write-flash --flash-mode keep --flash-freq keep --flash-size keep --force \\
+  esptool --chip esp32s3 -p PORT --no-stub --after no-reset write-flash --flash-mode keep --flash-freq keep --flash-size keep --force \\
     $BOOT_OFF $OUT/bootloader-enc.bin $PART_OFF $OUT/partition-table-enc.bin $APP_OFF $OUT/app-enc.bin $KEY_OFF $OUT/ydkey-enc.bin
 Update (app only, keeps the key and the pairing):
   esptool --chip esp32s3 -p PORT --no-stub write-flash --flash-mode keep --flash-freq keep --flash-size keep \\

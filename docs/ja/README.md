@@ -82,7 +82,7 @@ idf.py -C firmware/desk_unit set-target esp32s3 build merge-bin -o keyrelay_desk
   PIN 入力済みの状態は消えます。
 - シリアルのログは、既定では英語です。`idf.py menuconfig` → KeyRelay log language で日本語にできます。
 - セキュアブート・フラッシュ暗号化・NVS 暗号化は、既定では設定していません。手順は
-  [HARDENING.md](HARDENING.md) にあります（パソコン上で確認済み、実機では未確認）。
+  [HARDENING.md](HARDENING.md) にあります（レシーバーの実機で確認済み。机上ユニットはまだ）。
 
 ## ライセンス
 

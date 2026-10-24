@@ -96,7 +96,8 @@ docs/                   build guide (English / Japanese), images
 - Serial log messages are in English by default. Japanese can be selected in `idf.py menuconfig` →
   KeyRelay log language.
 - Secure boot, flash encryption and NVS encryption are not set up by default. The procedure in
-  [docs/HARDENING.md](docs/HARDENING.md) is verified on a computer, not yet on a unit.
+  [docs/HARDENING.md](docs/HARDENING.md) is verified on a receiver; the desk unit is not hardened on
+  hardware yet.
 
 ## License
 

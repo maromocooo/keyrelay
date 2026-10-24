@@ -125,8 +125,8 @@ The desk unit sits on the desk, so harden it first.
   (see "If the PSK leaks"). Keep the desk unit where you would keep the key itself.
   [docs/HARDENING.md](docs/HARDENING.md) turns on flash encryption (release mode), secure boot v2, NVS
   encryption and secure download mode, with a configuration that builds for both units and a script for
-  signing and encrypting. It has been verified on a computer but not yet on a unit, and every eFuse step
-  is irreversible: try it on a spare board first.
+  signing and encrypting. It has been verified on a receiver (not yet on a desk unit), and every eFuse
+  step is irreversible: try it on a spare board first.
 - **The desk unit's serial console, if you enable updates over it.** With `YD_UART_DOWNLOAD_CMD 1`
   in `firmware/desk_unit/main/main.c` (default `0`), sending the line `keyrelay-download` to the desk
   unit's USB-UART reboots it into the ROM bootloader, so you can update it without opening the case.
