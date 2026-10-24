@@ -105,6 +105,14 @@ int main(void)
     CHECK(yd_sec_auth_mac(&k, YD_SEC_ROLE_PERIPHERAL, NC, NP, mac) == 0 && memcmp(mac, MAC_P, 16) == 0, "peripheral MAC");
     CHECK(memcmp(MAC_C, MAC_P, 16) != 0, "roles give different MACs");
 
+    /* GATT UUIDs derived from the PSK, one label per UUID */
+    uint8_t u0[YD_SEC_GATT_UUID_LEN], u1[YD_SEC_GATT_UUID_LEN], u2[YD_SEC_GATT_UUID_LEN];
+    CHECK(yd_sec_gatt_uuid(PSK, YD_SEC_GATT_SVC, u0) == 0 && memcmp(u0, GATT_SVC, 16) == 0, "service UUID matches reference");
+    CHECK(yd_sec_gatt_uuid(PSK, YD_SEC_GATT_TO_DESK, u1) == 0 && memcmp(u1, GATT_TO_DESK, 16) == 0, "to-desk UUID matches reference");
+    CHECK(yd_sec_gatt_uuid(PSK, YD_SEC_GATT_TO_RECV, u2) == 0 && memcmp(u2, GATT_TO_RECV, 16) == 0, "to-receiver UUID matches reference");
+    CHECK(memcmp(u0, u1, 16) != 0 && memcmp(u0, u2, 16) != 0 && memcmp(u1, u2, 16) != 0, "the three UUIDs differ");
+    CHECK(memcmp(u0, k.k_c2p, 16) != 0 && memcmp(u0, k.k_auth, 16) != 0, "a GATT UUID is not a session key");
+
     /* every input must change the keys */
     yd_sec_keys_t k2;
     uint8_t t32[32], t16[16];
