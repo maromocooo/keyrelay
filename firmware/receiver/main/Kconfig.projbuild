@@ -19,20 +19,21 @@ choice YD_OTP_KBD_FILTER
     help
         What the receiver is allowed to type when key reports arrive from the desk unit.
 
-        "Yubico OTP only" types nothing but the 16 ModHex letters and Enter, without modifier keys.
-        That is all a Yubico OTP (the factory setting of slot 1) contains. Someone who stole the
-        pairing key and poses as your desk unit can then not type commands on your computer.
+        "Yubico OTP only" types only what a Yubico OTP (the factory setting of slot 1) looks like:
+        32 to 64 ModHex letters without modifier keys, then at most one Enter. Someone who stole the
+        pairing key and poses as your desk unit can then not type commands, or press Enter after a
+        short word, on your computer.
 
         Choose "Any key" if a slot types a static password, an OATH-HOTP code (digits) or uses the
         Tab options.
 
-        既定の「Yubico OTP only」は、ModHex の16文字と Enter（修飾キーなし）しか打たない。
-        Yubico OTP（スロット1の出荷時の設定）はこれだけでできている。ペアリング用の鍵を盗んで
-        机上ユニットになりすました相手に、コマンドなどを打ち込まれないようにするため。
+        既定の「Yubico OTP only」は、Yubico OTP（スロット1の出荷時の設定）の形のもの、つまり
+        修飾キーなしの ModHex 32〜64 文字と、そのあとの Enter 1回しか打たない。ペアリング用の鍵を盗んで
+        机上ユニットになりすました相手に、コマンドや短い単語＋Enter を打ち込まれないようにするため。
         静的パスワード・OATH-HOTP（数字）・Tab の設定を使うスロットがあるなら「Any key」にする。
 
     config YD_OTP_KBD_FILTER_MODHEX
-        bool "Yubico OTP only (ModHex letters and Enter)"
+        bool "Yubico OTP only (32-64 ModHex letters, then Enter)"
 
     config YD_OTP_KBD_FILTER_NONE
         bool "Any key (static passwords, OATH-HOTP, Tab)"
