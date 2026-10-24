@@ -20,7 +20,7 @@ plugged into your computer. Touch the key on your desk; your computer can stay c
 | FIDO2 / U2F (passkeys, WebAuthn) | 64-byte CTAPHID reports | Works: webauthn.io register + sign-in (Chrome) |
 | OpenPGP (GnuPG) | CCID smart-card messages | Works: `gpg --card-status` |
 | OTP typed on touch | keyboard reports, sent as a fixed sequence per touch; only Yubico OTP keys by default | Works: Yubico OTP validated on demo.yubico.com |
-| PIV, OATH | CCID smart-card messages | Relayed; see the note on Yubico tools below |
+| PIV, OATH | CCID smart-card messages | Works with ykman through `tools/keyrelay_ykman.py`: `info`, `piv info`, `oath accounts add / code / delete` (ykman 5.9.2) |
 | OTP challenge-response | HID feature reports, proxied one by one | Relayed; see the note on Yubico tools below. Commands that change slots or settings are blocked ([SECURITY.md](SECURITY.md)) |
 
 Not yet confirmed: PIV/OpenPGP signing, PIV through standard PC/SC software (e.g. OpenSC), and
@@ -28,14 +28,29 @@ passkey management through Chrome's `chrome://settings/securityKeys`.
 
 ### ykman, Yubico Authenticator and KeePassXC
 
-These tools look for devices with Yubico's USB vendor ID. ykman can also use a smart-card reader you
-pick with `--reader`, but it works out the YubiKey model from the reader's name (such as "Yubico
-YubiKey OTP+FIDO+CCID"), so with KeyRelay's reader it stops with "Failed to connect to YubiKey".
-KeyRelay uses its own USB IDs and names and does not impersonate another vendor, so **these tools do
-not work with KeyRelay today**. That affects OATH codes (Yubico Authenticator / ykman), PIV management
-(ykman) and OTP challenge-response (KeePassXC). The plan is to get KeyRelay supported upstream once it has its own pid.codes PID:
-- **ykman:** let it read device information over a PC/SC reader that is not named "Yubico YubiKey".
-- **KeePassXC:** add KeyRelay's ID to its list of supported devices.
+These tools look for devices with Yubico's USB vendor ID. KeyRelay uses its own USB IDs and names
+and does not impersonate another vendor.
+
+- **ykman:** works through [`tools/keyrelay_ykman.py`](tools/keyrelay_ykman.py) for the commands that
+  use the smart-card interface (`info`, `piv`, `oath`, `openpgp`, `config`). ykman can use a reader
+  picked with `--reader`, but it works out the YubiKey model from the reader's name (such as "Yubico
+  YubiKey OTP+FIDO+CCID"), so with KeyRelay's reader it stops with "Failed to connect to YubiKey". The
+  script tells ykman, inside its own process only, which model to assume for a reader named
+  "KeyRelay", then runs the normal ykman CLI. Run it with the Python that ykman is installed in:
+
+  ```sh
+  # ykman installed with Homebrew; run from the repository root
+  ykr() { "$(brew --prefix ykman)/libexec/bin/python" tools/keyrelay_ykman.py --reader KeyRelay "$@"; }
+  ykr info
+  ykr piv info
+  ykr oath accounts code
+  ```
+
+  `ykman otp` and `ykman fido` do not work: they use other USB interfaces, not the smart-card reader.
+  The script replaces a private ykman function, so an ykman update may break it (tested with ykman
+  5.9.2).
+- **Yubico Authenticator (GUI) and KeePassXC** do not work today. Once KeyRelay has its own pid.codes
+  PID, the plan is to ask KeePassXC to add it to its list of supported devices.
 
 Browsers (FIDO), GnuPG and typed OTPs work as is.
 
