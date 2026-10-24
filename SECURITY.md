@@ -45,10 +45,13 @@ Two independent layers:
    example a receiver that lost its bond) and refuses outside it. Before deleting the old bond it keeps
    a copy in RAM, and it writes that copy back unless the peer that paired again completes the layer-2
    handshake on that connection, so claiming the receiver's address within the window does not replace
-   its bond either. A second re-pairing on the same connection is refused. When the bond store is full,
-   no existing bond is evicted to make room. A device without the PSK therefore cannot make the
-   receiver stick to it, keep the desk unit's bond for itself, or push the legitimate peer out. If you
-   erase the desk unit's bonds, erase the receiver's too (see "Generating the pre-shared key" below).
+   its bond either. A second re-pairing on the same connection is refused. The copy exists only in RAM:
+   if the desk unit loses power after accepting a re-pairing and before that peer completes the
+   handshake, the previous bond is not written back, and the legitimate receiver cannot connect until
+   you hold BOOT on it for 3 s to pair again. When the bond store is full, no existing bond is evicted
+   to make room. A device without the PSK therefore cannot make the receiver stick to it, keep the desk
+   unit's bond for itself, or push the legitimate peer out. If you erase the desk unit's bonds, erase
+   the receiver's too (see "Generating the pre-shared key" below).
 2. **Application layer with a pre-shared key (PSK) and ephemeral X25519** (link protocol v2), implemented in
    [`firmware/components/yd_link/yd_sec.c`](firmware/components/yd_link/yd_sec.c):
    - The same random 256-bit key is flashed into both units (`YDK1` + 32 bytes at `0x190000`,
