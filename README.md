@@ -28,10 +28,12 @@ passkey management through Chrome's `chrome://settings/securityKeys`.
 
 ### ykman, Yubico Authenticator and KeePassXC
 
-These tools only talk to USB devices that carry Yubico's USB vendor ID. KeyRelay uses its own USB
-IDs and does not impersonate another vendor, so **these tools do not detect KeyRelay today**. That
-affects OATH codes (Yubico Authenticator / ykman), PIV management (ykman) and OTP challenge-response
-(KeePassXC). The plan is to get KeyRelay supported upstream once it has its own pid.codes PID:
+These tools look for devices with Yubico's USB vendor ID. ykman can also use a smart-card reader you
+pick with `--reader`, but it works out the YubiKey model from the reader's name (such as "Yubico
+YubiKey OTP+FIDO+CCID"), so with KeyRelay's reader it stops with "Failed to connect to YubiKey".
+KeyRelay uses its own USB IDs and names and does not impersonate another vendor, so **these tools do
+not work with KeyRelay today**. That affects OATH codes (Yubico Authenticator / ykman), PIV management
+(ykman) and OTP challenge-response (KeePassXC). The plan is to get KeyRelay supported upstream once it has its own pid.codes PID:
 - **ykman:** let it read device information over a PC/SC reader that is not named "Yubico YubiKey".
 - **KeePassXC:** add KeyRelay's ID to its list of supported devices.
 

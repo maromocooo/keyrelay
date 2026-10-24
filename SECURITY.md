@@ -43,6 +43,13 @@ Two independent layers:
    [`firmware/components/yd_link/yd_sec.c`](firmware/components/yd_link/yd_sec.c):
    - The same random 256-bit key is flashed into both units (`YDK1` + 32 bytes at `0x190000`,
      partition `ydkey`). Without a valid key, BLE is never started.
+   - The units find each other without a fixed identifier: the desk unit advertises no name, and the GATT
+     service and characteristic UUIDs are derived from the PSK (each is the first 16 bytes of
+     `HMAC-SHA256(PSK, "keyrelay v2 gatt uuid" ‖ n)`, n = 0, 1, 2, so they have no visible relation to each
+     other). A scanner cannot pick out a KeyRelay unit by a well-known UUID or name, and a receiver ignores
+     desk units set up with a different PSK. Both units log the first four bytes of the service UUID as
+     `Link ID` at boot; they must match. A receiver that sees its registered desk unit, or a desk unit with
+     older firmware, advertising something else says so in its log.
    - On every connection, both sides send a 16-byte random nonce and a fresh X25519 public key. The
      X25519 private keys exist only in RAM and are wiped right after the key derivation. Per-connection
      keys come from HKDF-SHA256 with the PSK and the X25519 shared secret as input key material and both
@@ -61,8 +68,9 @@ Two independent layers:
      the counter forms the IV. Each packet's counter must be exactly one more than the previous one, so
      replayed, reordered and selectively dropped packets are all detected and end the connection. The
      link is dropped before the counter could wrap.
-   - Before encryption, every packet is padded (`0x80`, then zeros) to a multiple of 32 bytes, so packet
-     sizes do not show the length of a PIN (OpenPGP sends PINs unpadded). The keystrokes of one touch are
+   - Before encryption, every packet is padded (`0x80`, then zeros) to a multiple of 32 bytes, or to the
+     largest size that fits in one packet when that is smaller, so packet sizes do not show the length of
+     a PIN (OpenPGP sends PINs unpadded). The keystrokes of one touch are
      sent as a fixed sequence: one packet of the same size every 50 ms for at least 2 seconds, whatever
      was typed, so neither packet sizes nor their timing show how long a typed OTP or static password is.
    - Both units must run the same link protocol version. A unit that meets a different version logs it
@@ -73,20 +81,27 @@ but cannot read, inject, replay or selectively drop relayed messages.
 
 ## If the PSK leaks
 
-The PSK is a symmetric key shared by both units. Realistically it leaks by reading the flash of either
-unit (flash encryption is off by default) or from a copy of `keyrelay-key.bin` left on a computer.
-Flash readout also gives the BLE bonds (LTKs), so the BLE encryption does not help in that case.
+The PSK is a symmetric key shared by all units (the desk unit and each receiver). Realistically it leaks
+by reading the flash of any unit (flash encryption is off by default) or from a copy of `keyrelay-key.bin`
+left on a computer. Flash readout also gives the BLE bonds (LTKs), so the BLE encryption does not help in
+that case.
 
 - **Past traffic stays confidential.** Recordings of earlier connections cannot be decrypted with the PSK
   and the bonds, because the X25519 secrets of those connections were never stored (see above).
 - **Posing as the desk unit (the more serious direction).** With the PSK, a fake desk unit can connect to
   your real receiver. The receiver is a USB keyboard to your computer, so the fake unit could make it
-  **type keystrokes, with no touch and no PIN**. By default the receiver only types the 16 ModHex
-  letters and Enter, without modifier keys, which is all a Yubico OTP contains
-  (`CONFIG_YD_OTP_KBD_FILTER_MODHEX`), so it cannot type commands. If you choose "any key" for static
-  passwords, or build with `CONFIG_YD_OTP_KEYBOARD=n`, read the keystroke-injection item below. A fake
-  desk unit can also answer smart-card and FIDO requests itself, but it cannot produce signatures or
-  assertions of your key.
+  **type keystrokes, with no touch and no PIN**. By default the receiver only types input shaped like a
+  Yubico OTP (`CONFIG_YD_OTP_KBD_FILTER_MODHEX`): in one burst of keystrokes, up to 64 of the 16 ModHex
+  letters without modifier keys, and a single Enter only after 32 to 64 of them. Anything else blocks the
+  rest of that burst. Each report may hold one key, and the receiver types each accepted key as a press
+  and a release itself, so holding a key down for the computer's key repeat does not work either. A fake
+  desk unit therefore cannot type commands, other characters, or a short
+  answer followed by Enter. It can still type ModHex letters, and an Enter after 32 of them, which apps
+  with single-letter shortcuts (vim, some web apps) and a dialog's default button react to, as they
+  would to an OTP typed at the wrong moment. If you choose "any key" for static passwords, read the
+  keystroke-injection item below. If you do not use OTPs, build the receiver with
+  `CONFIG_YD_OTP_KEYBOARD=n`: it then has no keyboard at all. A fake desk unit can also answer
+  smart-card and FIDO requests itself, but it cannot produce signatures or assertions of your key.
 - **Posing as the receiver.** A fake receiver can talk to your key from radio range. Most operations still
   need the PIN and a touch, but not all of them:
   - OATH (TOTP/HOTP) codes can be calculated without a touch or PIN unless you set an OATH password and
@@ -95,10 +110,32 @@ Flash readout also gives the BLE bonds (LTKs), so the BLE encryption does not he
     programmed with `--touch`.
   - Wrong PIN attempts can use up the PIN retry counters and lock PIV/OpenPGP PINs (denial of service).
 - **You may not notice.** A stolen key is missed quickly, a silently copied PSK is not. If you suspect a
-  leak, generate a new key file, flash it to both units and erase the BLE bonds.
+  leak, generate a new key file, flash it to all units and erase the BLE bonds.
 
 The real fix is to keep the PSK from being read: see [docs/HARDENING.md](docs/HARDENING.md).
 The desk unit sits on the desk, so harden it first.
+
+## If a unit is lost or stolen
+
+A unit in someone else's hands is still a working KeyRelay unit, hardened or not. It does not need to
+read anything out of its flash to talk to your other units.
+
+- **A receiver.** It has the PSK and a bond with your desk unit, so from radio range it can use your key
+  like your own receiver would (see "Posing as the receiver" above). Erasing the desk unit's bonds (BOOT
+  for 3 s) does **not** lock it out: a desk unit without bonds accepts a new pairing, and the lost
+  receiver can complete the handshake because it has the PSK.
+- **The desk unit.** If the security key was in it, deal with the key first, as with any lost key. The
+  desk unit itself has the PSK and a bond with each receiver, so it can pose as the desk unit to them
+  (see "Posing as the desk unit" above).
+
+In both cases, generate a new PSK and flash it to every unit you still have, then erase the BLE bonds on
+them. Units with the old PSK can no longer find or authenticate the others.
+
+This follows from the design: one PSK is shared by all units, so changing it is the only way to revoke
+a unit, and it means reflashing all the others. Per-unit keys (each unit with its own key pair, and the
+desk unit with a list of the receivers it accepts, as in Noise `KK`) would make it possible to remove
+one receiver without touching the others. That would be a new link protocol version and is not
+implemented.
 
 ## What KeyRelay does *not* protect against
 
@@ -110,8 +147,8 @@ The desk unit sits on the desk, so harden it first.
 - **Keystroke injection.** The receiver is a USB keyboard as far as the computer is concerned (that is
   how OTPs are typed). Modified receiver firmware, or a look-alike receiver someone plugs in, could type
   arbitrary keystrokes, like any malicious USB keyboard. A fake desk unit holding the PSK could make the
-  real receiver type, too; the default ModHex filter limits that to Yubico OTP characters and Enter. If
-  a slot types a static password or OATH-HOTP digits, you have to select "any key"
+  real receiver type, too; the default filter limits that to input shaped like a Yubico OTP (see "If
+  the PSK leaks"). If a slot types a static password or OATH-HOTP digits, you have to select "any key"
   (`CONFIG_YD_OTP_KBD_FILTER_NONE`), which removes that limit. If you do not use OTPs, build the receiver
   with `CONFIG_YD_OTP_KEYBOARD=n` (menuconfig → KeyRelay): it then has no keyboard interface at all.
 - **A touch approves whatever is pending.** The touch proves that someone is at the desk unit, not that
@@ -126,7 +163,13 @@ The desk unit sits on the desk, so harden it first.
   [docs/HARDENING.md](docs/HARDENING.md) turns on flash encryption (release mode), secure boot v2, NVS
   encryption and secure download mode, with a configuration that builds for both units and a script for
   signing and encrypting. It has been verified on a receiver (not yet on a desk unit), and every eFuse
-  step is irreversible: try it on a spare board first.
+  step is irreversible: try it on a spare board first. Hardening keeps the PSK from being read out; it
+  does not stop a stolen unit from being used (see "If a unit is lost or stolen"), and the ESP32-S3 does
+  not resist fault injection on an opened board (see HARDENING.md).
+- **Plaintext in the units' memory.** The link layer wipes the buffers it encrypts from and decrypts
+  into, but its send queue and the USB and reassembly buffers that carry PINs and APDUs keep their
+  contents until they are reused.
+  Reading RAM needs a debugger (JTAG, which hardening disables) or a physical attack on the chip.
 - **The desk unit's serial console, if you enable updates over it.** With `YD_UART_DOWNLOAD_CMD 1`
   in `firmware/desk_unit/main/main.c` (default `0`), sending the line `keyrelay-download` to the desk
   unit's USB-UART reboots it into the ROM bootloader, so you can update it without opening the case.
@@ -143,7 +186,9 @@ The desk unit sits on the desk, so harden it first.
 - **What the radio still shows.** Padding hides exact lengths, but not everything: that the link is in
   use and when, that a touch typed something, the number of packets and the size class of each (for
   example the rough size of a large smart-card response). If typing takes longer than 2 seconds (for
-  example with the key's pacing option), the extra time shows.
+  example with the key's pacing option), the extra time shows. The units advertise no name or fixed UUID,
+  but their Bluetooth addresses are fixed, so a unit can be recognised again whenever it is in range, and
+  the connection shows which two units belong together.
 - **NFC on the key.** The relay does not change the key's NFC interface. A YubiKey 5 NFC left on the
   desk answers any phone held against it, and by default its NFC interface hands out a Yubico OTP.
   If you do not use NFC, turn it off: plug the key directly into a computer and run
@@ -165,10 +210,13 @@ Generate it on your own computer and never commit it (`*key*.bin` is in `.gitign
 (printf 'YDK1'; head -c 32 /dev/urandom) > keyrelay-key.bin
 ```
 
-Flash the same file to **both** units at `0x190000`. To rotate the key, generate a new file and
-flash it to both units.
+Flash the same file to **all** units (the desk unit and each receiver) at `0x190000`. To rotate the key,
+generate a new file and flash it to all units (hardened units: see "Updating a hardened unit" in
+[docs/HARDENING.md](docs/HARDENING.md)). The key also determines the BLE service UUIDs, so units with
+different keys do not even see each other.
 
 BLE bonds are stored in the `nvs` partition. They are cleared by holding BOOT for 3 s (receiver: while
 held; desk unit: on release, and its BOOT button is inside the case), and also by flashing a full merged
 image at `0x0`, which overwrites `nvs`. A desk unit without a bond, or within 120 s of booting, accepts
-a new bond; only a peer holding the PSK can then complete the KeyRelay handshake.
+a new bond; only a peer holding the PSK can then complete the KeyRelay handshake. Erasing bonds
+therefore does not lock out a unit that still has the PSK (see "If a unit is lost or stolen").
