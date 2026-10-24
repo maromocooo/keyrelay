@@ -21,7 +21,7 @@ plugged into your computer. Touch the key on your desk; your computer can stay c
 | OpenPGP (GnuPG) | CCID smart-card messages | Works: `gpg --card-status` |
 | OTP typed on touch | keyboard reports, sent as a fixed sequence per touch; only Yubico OTP keys by default | Works: Yubico OTP validated on demo.yubico.com |
 | PIV, OATH | CCID smart-card messages | Relayed; see the note on Yubico tools below |
-| OTP challenge-response, slot configuration | HID feature reports, proxied one by one | Relayed; see the note on Yubico tools below |
+| OTP challenge-response | HID feature reports, proxied one by one | Relayed; see the note on Yubico tools below. Commands that change slots or settings are blocked ([SECURITY.md](SECURITY.md)) |
 
 Not yet confirmed: PIV/OpenPGP signing, PIV through standard PC/SC software (e.g. OpenSC), and
 passkey management through Chrome's `chrome://settings/securityKeys`.
