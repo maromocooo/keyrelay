@@ -986,7 +986,8 @@ static void tx_task(void *arg)
     }
 }
 
-esp_err_t ydl_ble_send(uint8_t ch, const uint8_t *data, uint16_t len)
+/* any_conn なら、いまの接続に送る。そうでなければ conn の接続がまだ続いているときだけ */
+static esp_err_t ble_send(bool any_conn, uint32_t conn, uint8_t ch, const uint8_t *data, uint16_t len)
 {
     if (!s_txq) {
         return ESP_ERR_INVALID_STATE;
@@ -996,8 +997,8 @@ esp_err_t ydl_ble_send(uint8_t ch, const uint8_t *data, uint16_t len)
         return ESP_ERR_INVALID_SIZE;
     }
     pkt_t p = { .kind = PK_DATA, .len = len + 1 };
-    if (!link_snapshot(&p.conn, &p.gen)) {
-        return ESP_ERR_INVALID_STATE;   /* 相互認証の済んだ接続がない */
+    if (!link_snapshot(&p.conn, &p.gen) || (!any_conn && p.gen != conn)) {
+        return ESP_ERR_INVALID_STATE;   /* 相互認証の済んだ接続がない、または conn の接続はもう切れた */
     }
     size_t cap = wire_cap(p.conn);
     if (yd_sec_sealed_len((size_t)len + 1, cap) == 0) {
@@ -1011,6 +1012,16 @@ esp_err_t ydl_ble_send(uint8_t ch, const uint8_t *data, uint16_t len)
     /* 平文の控えを残さない。キューの中の写しは、tx_task が取り出したあとも次に使われるまで残る（SECURITY.md） */
     yd_sec_wipe(&p, sizeof(p));
     return err;
+}
+
+esp_err_t ydl_ble_send(uint8_t ch, const uint8_t *data, uint16_t len)
+{
+    return ble_send(true, 0, ch, data, len);
+}
+
+esp_err_t ydl_ble_send_on(uint32_t conn, uint8_t ch, const uint8_t *data, uint16_t len)
+{
+    return ble_send(false, conn, ch, data, len);
 }
 
 uint16_t ydl_ble_max_payload(void)

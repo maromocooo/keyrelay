@@ -164,6 +164,11 @@ esp_err_t yd_link_send(uint8_t ch, const uint8_t *data, uint16_t len)
     return (s_transport == YD_LINK_UART) ? ydl_uart_send(ch, data, len) : ydl_ble_send(ch, data, len);
 }
 
+esp_err_t yd_link_send_on(uint32_t conn, uint8_t ch, const uint8_t *data, uint16_t len)
+{
+    return (s_transport == YD_LINK_UART) ? ydl_uart_send(ch, data, len) : ydl_ble_send_on(conn, ch, data, len);
+}
+
 uint16_t yd_link_max_payload(void)
 {
     return (s_transport == YD_LINK_UART) ? YD_LINK_MAX_PAYLOAD : ydl_ble_max_payload();
