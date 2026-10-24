@@ -13,11 +13,14 @@ test_bond_policy: test_bond_policy.c $(LINK)/yd_bond_policy.h
 	$(CC) $(CFLAGS) -I $(LINK) -o $@ test_bond_policy.c
 test_otp_batch: test_otp_batch.c ../../desk_unit/main/otp_batch.h
 	$(CC) $(CFLAGS) -I ../../desk_unit/main -o $@ test_otp_batch.c
-test: test_frag test_sec test_bond_policy test_otp_batch
+test_kbd_filter: test_kbd_filter.c ../../receiver/main/kbd_filter.h
+	$(CC) $(CFLAGS) -I ../../receiver/main -o $@ test_kbd_filter.c
+test: test_frag test_sec test_bond_policy test_otp_batch test_kbd_filter
 	./test_frag
 	./test_sec
 	./test_bond_policy
 	./test_otp_batch
+	./test_kbd_filter
 clean:
-	rm -f test_frag test_sec test_bond_policy test_otp_batch
+	rm -f test_frag test_sec test_bond_policy test_otp_batch test_kbd_filter
 .PHONY: all test clean

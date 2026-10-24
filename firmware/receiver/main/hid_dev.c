@@ -10,9 +10,11 @@
  * 新しいタッチの最初に「英数」キーを送って、日本語入力のままでも化けないようにする（YD_OTP_FORCE_EISU）。
  * 机上ユニットは長さをそろえるために「全部離す」で埋めて送ってくるので、続く「全部離す」は1つにまとめる。
  *
- * 既定（CONFIG_YD_OTP_KBD_FILTER_MODHEX）では、Yubico OTP に出てくるキー（ModHex の16文字と Enter、
- * 修飾キーなし）しか打たない。PSK を盗んで机上ユニットになりすました相手が、任意のキー入力
- * （コマンドなど）を打ち込むのを防ぐため（SECURITY.md）。
+ * 既定（CONFIG_YD_OTP_KBD_FILTER_MODHEX）では、Yubico OTP の形のもの（修飾キーなしの ModHex 32〜64 文字と、
+ * そのあとの Enter 1回）しか打たない（kbd_filter.h）。PSK を盗んで机上ユニットになりすました相手が、
+ * 任意のキー入力（コマンドや、ダイアログを閉じる Enter など）を打ち込むのを防ぐため（SECURITY.md）。
+ * このときは、通したキーを1つずつ「押す」「全部離す」の2つのレポートにして打ち、机上ユニットの「離す」は
+ * 使わない（キーを押しっぱなしにさせて、パソコンのキーリピートで文字を増やされないように）。
  *
  * ---- フィーチャーレポート ----
  *   Mac ──SET_REPORT(Feature)──▶ すぐ受け付けて、机上ユニットへ [SET, data]
@@ -32,6 +34,7 @@
 #include "esp_timer.h"
 #include "yd_link.h"
 #include "hid_dev.h"
+#include "kbd_filter.h"
 #include "yd_lang.h"
 
 static const char *TAG = "otp";
@@ -108,8 +111,11 @@ static QueueHandle_t s_kbd_q, s_ctl_q;
 static TaskHandle_t s_ctl_task;
 static volatile bool s_kbd_on, s_ctl_on;
 static uint32_t s_ctl_count;
-static uint32_t s_kbd_blocked;
+#if CONFIG_YD_OTP_KBD_FILTER_MODHEX
+static uint32_t s_kbd_blocked;      /* kbd_filter.h で止めたレポートの数 */
+#else
 static bool s_kbd_q_zero = true;    /* 最後にキューに入れたレポートが全部 0（rx_task だけが触る） */
+#endif
 
 static inline int64_t now_ms(void)
 {
@@ -413,43 +419,6 @@ static bool kbd_all_zero(const uint8_t *d)
     return true;
 }
 
-#if CONFIG_YD_OTP_KBD_FILTER_MODHEX
-/* Yubico OTP（ModHex: c b d e f g h i j k l n r t u v）と Enter の HID 使用コード */
-static bool kbd_key_allowed(uint8_t k)
-{
-    switch (k) {
-    case 0x05: case 0x06: case 0x07: case 0x08: case 0x09: case 0x0A: case 0x0B: case 0x0C:   /* b c d e f g h i */
-    case 0x0D: case 0x0E: case 0x0F: case 0x11: case 0x15: case 0x17: case 0x18: case 0x19:   /* j k l n r t u v */
-    case 0x28:                                                                                  /* Enter */
-        return true;
-    default:
-        return false;
-    }
-}
-#endif
-
-/* 打ってよいレポートか（「全部離す」はいつも可） */
-static bool kbd_report_allowed(const uint8_t *d)
-{
-#if CONFIG_YD_OTP_KBD_FILTER_MODHEX
-    if (kbd_all_zero(d)) {
-        return true;
-    }
-    if (d[0] != 0) {
-        return false;                   /* Shift / Ctrl / Cmd などの修飾キー */
-    }
-    for (int i = 2; i < KBD_REPORT_LEN; i++) {
-        if (d[i] && !kbd_key_allowed(d[i])) {
-            return false;
-        }
-    }
-    return true;
-#else
-    (void)d;
-    return true;
-#endif
-}
-
 static void kbd_task(void *arg)
 {
     kbd_rep_t r;
@@ -548,19 +517,35 @@ void hid_dev_kbd_from_link(const uint8_t *data, uint16_t len)
     for (uint16_t off = 0; off < len; off += KBD_REPORT_LEN) {
         kbd_rep_t r;
         memcpy(r.d, data + off, KBD_REPORT_LEN);
-        if (!kbd_report_allowed(r.d)) {
+#if CONFIG_YD_OTP_KBD_FILTER_MODHEX
+        static kbdf_t f;                /* rx_task だけが触る */
+        int key = kbdf_key(&f, r.d, now_ms());
+        if (key == KBDF_BLOCKED) {
             static int64_t last_log;
             s_kbd_blocked++;
             if (now_ms() - last_log > 2000) {
                 last_log = now_ms();
-                ESP_LOGW(TAG, YD_L("Blocked a key report that a Yubico OTP never contains (modifiers 0x%02x, key 0x%02x; %" PRIu32 " so far). "
+                ESP_LOGW(TAG, YD_L("Blocked key input that does not look like a Yubico OTP (modifiers 0x%02x, key 0x%02x; %" PRIu32 " so far). "
                                    "For static passwords or OATH-HOTP, build with CONFIG_YD_OTP_KBD_FILTER_NONE",
-                                   "Yubico OTP には出てこないキー入力を止めました（修飾キー 0x%02x、キー 0x%02x、累計 %" PRIu32 " 件）。"
+                                   "Yubico OTP の形でないキー入力を止めました（修飾キー 0x%02x、キー 0x%02x、累計 %" PRIu32 " 件）。"
                                    "静的パスワードや OATH-HOTP を使うなら CONFIG_YD_OTP_KBD_FILTER_NONE でビルドしてください"),
                          r.d[0], r.d[2], s_kbd_blocked);
             }
             continue;
         }
+        if (key == 0) {
+            continue;                   /* 「離す」はこちらで送るので、机上ユニットの分は使わない */
+        }
+        /* 1文字を「押す」「全部離す」の2つで打つ。2つとも入らないなら、押すほうも入れない。
+         * rx_task（BLE 受信）を止めないように待たない */
+        if (uxQueueSpacesAvailable(s_kbd_q) < 2) {
+            ESP_LOGW(TAG, YD_L("Keyboard queue full: input dropped", "キーボードのキューが一杯。入力を破棄"));
+            break;
+        }
+        kbd_rep_t press = { .d = { 0, 0, (uint8_t)key } }, up = { 0 };
+        xQueueSend(s_kbd_q, &press, 0);
+        xQueueSend(s_kbd_q, &up, 0);
+#else
         bool zero = kbd_all_zero(r.d);
         if (zero && s_kbd_q_zero) {
             continue;                   /* 机上ユニットが長さをそろえるために入れた埋め草 */
@@ -571,6 +556,7 @@ void hid_dev_kbd_from_link(const uint8_t *data, uint16_t len)
             ESP_LOGW(TAG, YD_L("Keyboard queue full: input dropped", "キーボードのキューが一杯。入力を破棄"));
             break;
         }
+#endif
     }
 }
 
