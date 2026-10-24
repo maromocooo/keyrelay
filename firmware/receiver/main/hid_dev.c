@@ -100,6 +100,7 @@ static volatile int64_t s_get_t0;
 /* ---- キュー ---- */
 typedef struct {
     uint8_t d[KBD_REPORT_LEN];
+    uint32_t epoch;                 /* 入れたときの s_kbd_epoch（ModHex フィルターのときだけ使う） */
 } kbd_rep_t;
 
 typedef struct {
@@ -113,6 +114,9 @@ static volatile bool s_kbd_on, s_ctl_on;
 static uint32_t s_ctl_count;
 #if CONFIG_YD_OTP_KBD_FILTER_MODHEX
 static uint32_t s_kbd_blocked;      /* kbd_filter.h で止めたレポートの数 */
+/* kbd_task が Mac に送れなかったレポートの数（kbd_task だけが書く）。フィルターは送れなかった文字も数えているので、
+ * これが変わったら rx_task はそのまとまりを打たず、kbd_task は古い値で入れられたレポートを送らない */
+static volatile uint32_t s_kbd_epoch;
 #else
 static bool s_kbd_q_zero = true;    /* 最後にキューに入れたレポートが全部 0（rx_task だけが触る） */
 #endif
@@ -437,6 +441,11 @@ static void kbd_task(void *arg)
         if (zero && sent_zero) {
             continue;                   /* 埋め草（続けて来る「全部離す」） */
         }
+#if CONFIG_YD_OTP_KBD_FILTER_MODHEX
+        if (!zero && r.epoch != s_kbd_epoch) {
+            continue;                   /* 送れなかった文字より前に入っていた同じまとまりの残り（Enter を含む） */
+        }
+#endif
 #if YD_OTP_FORCE_EISU
         if (kbd_has_keys(r.d) && (first || (xTaskGetTickCount() - last) > pdMS_TO_TICKS(KBD_BURST_GAP_MS))) {
             static const uint8_t eisu[KBD_REPORT_LEN] = { 0, 0, HID_KEY_LANG2 };
@@ -449,6 +458,10 @@ static void kbd_task(void *arg)
 #endif
         if (!kbd_send(r.d)) {
             ESP_LOGW(TAG, YD_L("Keyboard send timed out (not connected to the host?)", "キーボードの送信待ちタイムアウト（Macに未接続？）"));
+#if CONFIG_YD_OTP_KBD_FILTER_MODHEX
+            s_kbd_epoch++;
+            continue;                   /* Mac が見ている状態は変わっていない（押したままなら KBD_STUCK_MS で離す） */
+#endif
         }
         sent_zero = zero;
         pressed = kbd_has_keys(r.d);
@@ -519,6 +532,12 @@ void hid_dev_kbd_from_link(const uint8_t *data, uint16_t len)
         memcpy(r.d, data + off, KBD_REPORT_LEN);
 #if CONFIG_YD_OTP_KBD_FILTER_MODHEX
         static kbdf_t f;                /* rx_task だけが触る */
+        static uint32_t seen_epoch;
+        uint32_t epoch = s_kbd_epoch;
+        if (epoch != seen_epoch) {
+            seen_epoch = epoch;
+            kbdf_drop(&f);              /* kbd_task が送れなかった文字がある */
+        }
         int key = kbdf_key(&f, r.d, now_ms());
         if (key == KBDF_BLOCKED) {
             static int64_t last_log;
@@ -544,7 +563,7 @@ void hid_dev_kbd_from_link(const uint8_t *data, uint16_t len)
             kbdf_drop(&f);
             break;
         }
-        kbd_rep_t press = { .d = { 0, 0, (uint8_t)key } }, up = { 0 };
+        kbd_rep_t press = { .d = { 0, 0, (uint8_t)key }, .epoch = epoch }, up = { .epoch = epoch };
         xQueueSend(s_kbd_q, &press, 0);
         xQueueSend(s_kbd_q, &up, 0);
 #else
