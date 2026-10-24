@@ -81,6 +81,8 @@ typedef enum {
 typedef struct {
     uint8_t kind;
     uint16_t len;
+    uint16_t conn;      /* tx: 送り先の接続（キューに入れた時点のもの） */
+    uint32_t gen;       /* キューに入れた時点の接続の世代。違えば古い接続のものなので捨てる */
     uint8_t buf[BLE_PKT_MAX];
 } pkt_t;
 
@@ -89,10 +91,30 @@ static bool s_is_central;
 static uint8_t s_own_addr_type;
 static QueueHandle_t s_txq, s_rxq;
 
+/* いまの接続と、その接続の状態。下の5つは s_link_mutex を持って変える。
+ *  - s_conn と s_gen（接続の世代）を変えるのは NimBLE のホストタスクだけ（接続・切断のとき。link_begin / link_end）。
+ *    世代は接続・切断のたびに増える
+ *  - 送受信キューのパケット、ハンドシェイクの状態、タイマーは、どの世代のものかを持っている。切断を決める
+ *    （close_conn）・s_up を上げる（link_authed）・送る（tx_task）ときに、ロックの中でそれが今の世代かを確かめる。
+ *    切断と再接続が処理の途中に起きても、古い接続の処理が新しい接続を切ったり、新しい接続に送ったり、
+ *    新しい接続を認証済みにしたりしない（接続ハンドルの番号は使い回されるので、ハンドルだけでは見分けられない）
+ *  - ロックを持ったまま呼ぶ NimBLE の関数（ble_gap_terminate と送信）は、ホストタスクを待たない
+ *    （HCI コマンドの応答はコントローラー側の文脈で処理される）。ただし通知の送信（ble_gatts_notify_custom）は、
+ *    送ったタスクの中で GAP の BLE_GAP_EVENT_NOTIFY_TX を呼ぶ。GAP のイベント処理で、そのイベントのときに
+ *    s_link_mutex を取ってはいけない
+ *  - s_up を変えたら notify_state() でアプリに知らせる（ロックを離してから） */
 static volatile uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
+static volatile uint32_t s_gen;
+static volatile bool s_up;                     /* yd_sec の相互認証まで完了（アプリにとっての「接続」） */
+static volatile bool s_closing;                /* 切ると決めた。切断が終わるまでデータもハンドシェイクも進めない */
+static volatile bool s_conn_authed;            /* この接続で相互認証が通った */
+static volatile bool s_forget_on_disconnect;   /* 認証前の失敗で、こちらから切った */
+static SemaphoreHandle_t s_link_mutex;
+static SemaphoreHandle_t s_state_mutex;        /* state_cb を1つずつ呼ぶ */
+static bool s_reported_up;                     /* state_cb で最後に知らせた値（s_state_mutex で守る） */
+
 static volatile bool s_encrypted;
-static volatile bool s_ready;        /* BLEとして送受信可（暗号化＋購読済み） */
-static volatile bool s_up;           /* yd_sec の相互認証まで完了 */
+static volatile bool s_ready;        /* BLEとして送受信可（暗号化＋購読済み）。ホストタスクが変える */
 static volatile bool s_subscribed;   /* peripheral: 相手が通知を購読中 */
 
 /* peripheral */
@@ -106,12 +128,9 @@ static bool s_have_target;
  * この接続で新しくペアリングしたのに認証まで進まなかった相手は、切断時に BLE のボンド情報も消す
  * （yd_bond_policy.h）。鍵を持たない偽の機器に「登録済みの相手」や新規ペアリングの枠を
  * 取られたままにしないため */
-static ble_addr_t s_peer_addr;
+static ble_addr_t s_peer_addr;                 /* s_peer_addr_valid とともに、ホストタスクが s_link_mutex を持って変える */
 static volatile bool s_peer_addr_valid;
-static volatile bool s_forget_on_disconnect;   /* 認証前の失敗で、こちらから切った */
-static volatile bool s_conn_was_bonded;        /* 接続した時点で、この相手のボンドがあった */
-static volatile bool s_conn_authed;            /* この接続で相互認証が通った */
-static volatile bool s_closing;                /* 切ると決めた。切断が終わるまでデータもハンドシェイクも進めない */
+static volatile bool s_conn_was_bonded;        /* 接続した時点で、この相手のボンドがあった（ホストタスク） */
 static volatile uint32_t s_ev_drops;           /* 受信キューに状態の通知を入れられなかった回数 */
 static uint32_t s_bond_delete_fail;            /* 消すべきボンドを消せなかった回数 */
 static ble_addr_t s_target;
@@ -248,21 +267,27 @@ void ydl_ble_get_conn_info(yd_link_conn_info_t *out)
     }
 }
 
-static void set_up(bool up)
+/* s_up が変わっていたらアプリに知らせる。s_up を変えたタスクが、s_link_mutex を離してから呼ぶ
+ * （state_cb の中から送信できるように）。複数のタスクが続けて変えても、最後に知らせる値は今の s_up になる
+ * （途中の変化は飛ばすことがある） */
+static void notify_state(void)
 {
-    if (s_up == up) {
-        return;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    bool up = s_up;
+    if (up != s_reported_up) {
+        s_reported_up = up;
+        ESP_LOGI(TAG, "%s", up ? YD_L("▶ BLE link up (encrypted, mutually authenticated with the key)", "▶ BLEリンク確立（暗号化＋鍵による相互認証済み）") : YD_L("■ BLE link down", "■ BLEリンク切断"));
+        if (up && s_cp_enabled) {
+            /* 確立直後はレシーバーが指定した低遅延パラメータ。CP_IDLE_AFTER_MS 後に省電力へ */
+            struct ble_gap_conn_desc d;
+            uint16_t c = s_conn;
+            cp_reset(c != BLE_HS_CONN_HANDLE_NONE && ble_gap_conn_find(c, &d) == 0 && d.conn_latency > 0);
+        }
+        if (s_cfg.state_cb) {
+            s_cfg.state_cb(up, s_cfg.state_cb_arg);
+        }
     }
-    s_up = up;
-    ESP_LOGI(TAG, "%s", up ? YD_L("▶ BLE link up (encrypted, mutually authenticated with the key)", "▶ BLEリンク確立（暗号化＋鍵による相互認証済み）") : YD_L("■ BLE link down", "■ BLEリンク切断"));
-    if (up && s_cp_enabled) {
-        /* 確立直後はレシーバーが指定した低遅延パラメータ。CP_IDLE_AFTER_MS 後に省電力へ */
-        struct ble_gap_conn_desc d;
-        cp_reset(s_conn != BLE_HS_CONN_HANDLE_NONE && ble_gap_conn_find(s_conn, &d) == 0 && d.conn_latency > 0);
-    }
-    if (s_cfg.state_cb) {
-        s_cfg.state_cb(up, s_cfg.state_cb_arg);
-    }
+    xSemaphoreGive(s_state_mutex);
 }
 
 static void print_addr(const char *label, const ble_addr_t *a)
@@ -331,11 +356,150 @@ static uint8_t s_my_epk[YD_SEC_EPK_LEN], s_peer_epk[YD_SEC_EPK_LEN];
 static int64_t s_x25519_us;                                    /* X25519 の計算にかかった時間（ログ用） */
 static uint8_t s_peer_mac[YD_SEC_MAC_LEN];
 static bool s_hs_hello_sent, s_hs_peer_hello, s_hs_keys, s_hs_auth_sent, s_hs_peer_auth;
+static bool s_keys_valid;              /* s_keys がこの接続の鍵（s_sec_mutex で守る） */
 static uint32_t s_tx_ctr, s_rx_ctr;
 static uint32_t s_rx_overflows_seen;   /* 鍵を作ったときの g_ydl_stats.rx_overflows（抜けの原因の見分け用） */
 static esp_timer_handle_t s_hs_timer;
 static esp_timer_handle_t s_conn_timer;
+/* タイマーをどの世代の接続のために、いつまでの期限で動かしたか（s_link_mutex で守る）。止めたはずの前の分が
+ * 遅れて呼ばれても、期限前なら何もしない */
+static uint32_t s_hs_timer_gen, s_conn_timer_gen;
+static int64_t s_hs_timer_due_us, s_conn_timer_due_us;
+static uint32_t s_hs_gen;                    /* ハンドシェイクの状態（上の s_hs_* と鍵）がどの世代のものか（rx_task だけが触る） */
+static uint16_t s_hs_conn;                   /* その接続のハンドル */
 static uint32_t s_sec_fail;
+
+/* 接続した（ホストタスク）。新しい世代を始め、接続ごとの状態を初期値に戻す */
+static void link_begin(uint16_t conn)
+{
+    xSemaphoreTake(s_link_mutex, portMAX_DELAY);
+    s_conn = conn;
+    s_gen++;
+    s_up = false;
+    s_closing = false;
+    s_conn_authed = false;
+    s_forget_on_disconnect = false;
+    s_peer_addr_valid = false;
+    xSemaphoreGive(s_link_mutex);
+    notify_state();
+}
+
+/* 暗号化できた相手のアドレスを覚える（ホストタスク） */
+static void link_set_peer(const ble_addr_t *a)
+{
+    xSemaphoreTake(s_link_mutex, portMAX_DELAY);
+    s_peer_addr = *a;
+    s_peer_addr_valid = true;
+    xSemaphoreGive(s_link_mutex);
+}
+
+/* 切れた（ホストタスク）。切れた接続が認証済みだったか・認証前の失敗で切ったかを返す。
+ * 世代が変わるので、これより後に古い接続の処理が切断を決めても、もう何も変わらない */
+static void link_end(bool *authed, bool *hs_failed)
+{
+    xSemaphoreTake(s_link_mutex, portMAX_DELAY);
+    *authed = s_conn_authed;
+    *hs_failed = s_forget_on_disconnect;
+    s_conn = BLE_HS_CONN_HANDLE_NONE;
+    s_gen++;
+    s_up = false;
+    s_closing = false;
+    s_conn_authed = false;
+    s_forget_on_disconnect = false;
+    xSemaphoreGive(s_link_mutex);
+    notify_state();
+}
+
+/* いまの接続と世代を、組み合わせが崩れないように読む。その時点で相互認証が済んでいれば（s_up）true */
+static bool link_snapshot(uint16_t *conn, uint32_t *gen)
+{
+    xSemaphoreTake(s_link_mutex, portMAX_DELAY);
+    *conn = s_conn;
+    *gen = s_gen;
+    bool up = s_up;
+    xSemaphoreGive(s_link_mutex);
+    return up;
+}
+
+/* BLE として送受信できなくなった（ホストタスク。購読の解除など、接続は残ることがある） */
+static void link_clear_up(void)
+{
+    xSemaphoreTake(s_link_mutex, portMAX_DELAY);
+    s_up = false;
+    xSemaphoreGive(s_link_mutex);
+    notify_state();
+}
+
+/* 相互認証が通った（rx_task）。gen がまだ今の接続で、切ると決めていなければ s_up を上げて true。
+ * 相互認証までの時間切れタイマーもここで止める（ロックの中なので、次の接続のタイマーは止めない）。
+ * *peer_valid と *peer に、その接続の相手のアドレス（暗号化できていれば）を返す */
+static bool link_authed(uint32_t gen, ble_addr_t *peer, bool *peer_valid)
+{
+    bool ok = false;
+    xSemaphoreTake(s_link_mutex, portMAX_DELAY);
+    if (gen == s_gen && s_conn != BLE_HS_CONN_HANDLE_NONE && s_ready && !s_closing) {
+        s_conn_authed = true;
+        s_up = true;
+        esp_timer_stop(s_hs_timer);
+        esp_timer_stop(s_conn_timer);
+        ok = true;
+    }
+    *peer_valid = ok && s_peer_addr_valid;
+    *peer = s_peer_addr;
+    xSemaphoreGive(s_link_mutex);
+    return ok;
+}
+
+/* 鍵を消した（rx_task。EV_DOWN）。同じ接続のまま購読をやり直したとき、その間に終わったハンドシェイクで
+ * 上げた s_up を残さない。残ると、鍵のないまま「接続中」のままになり、次のハンドシェイクも始まらない */
+static void link_keys_gone(uint32_t gen)
+{
+    bool changed = false;
+    xSemaphoreTake(s_link_mutex, portMAX_DELAY);
+    if (gen == s_gen && s_up) {
+        s_up = false;
+        changed = true;
+    }
+    xSemaphoreGive(s_link_mutex);
+    if (changed) {
+        notify_state();
+    }
+}
+
+#define CLOSE_HS_FAIL        0x01   /* 鍵の相互認証の前の失敗として切る（相手の BLE ボンドも消す） */
+#define CLOSE_UNLESS_UP      0x02   /* いま相互認証が済んでいれば（s_up）切らない */
+#define CLOSE_UNLESS_AUTHED  0x04   /* この接続で一度でも相互認証が通っていれば切らない */
+
+/* gen の接続を切ると決めて、切断を要求する。切ったら true。gen がもう今の接続でない（切れた後の、古い接続の
+ * 処理から呼ばれた）とき、すでに切ると決めているとき、flags の条件に当たるときは何もしない。
+ * why を渡せば、切ったときにログに出す */
+static bool close_conn(uint32_t gen, unsigned flags, const char *why)
+{
+    bool closed = false;
+    xSemaphoreTake(s_link_mutex, portMAX_DELAY);
+    if (gen == s_gen && s_conn != BLE_HS_CONN_HANDLE_NONE && !s_closing &&
+        !((flags & CLOSE_UNLESS_UP) && s_up) && !((flags & CLOSE_UNLESS_AUTHED) && s_conn_authed)) {
+        if ((flags & CLOSE_HS_FAIL) && !s_up) {
+            /* 鍵の相互認証が済む前の切断（不一致・時間切れ・形のおかしい HELLO/AUTH など）は理由を問わず、
+             * 相手の BLE ボンドも消す。正しい相手ならつなぎ直したときに自動でペアリングし直す */
+            s_forget_on_disconnect = true;
+        }
+        s_closing = true;
+        s_up = false;      /* 切断が終わるのを待たずに送受信を止める（後続の通し番号を相手に送らない） */
+        ble_gap_terminate(s_conn, (flags & CLOSE_HS_FAIL) ? BLE_ERR_AUTH_FAIL : BLE_ERR_REM_USER_CONN_TERM);
+        closed = true;
+    }
+    xSemaphoreGive(s_link_mutex);
+    if (closed) {
+        if (why && (flags & CLOSE_HS_FAIL)) {
+            ESP_LOGE(TAG, YD_L("%s → disconnecting", "%s → 切断します"), why);
+        } else if (why) {
+            ESP_LOGW(TAG, YD_L("%s → disconnecting", "%s → 切断します"), why);
+        }
+        notify_state();
+    }
+    return closed;
+}
 
 /* 接続・切断の通知。受信データと同じキューに入れて順番を保つ（切断より前のデータは、
  * 切断の処理より先に読まれる）。push_rx は最後の RXQ_EV_RESERVE 枠を使わないので、相手が
@@ -343,7 +507,7 @@ static uint32_t s_sec_fail;
  * 呼ばれないので、空きの確認と投入の間に割り込まれることはない */
 static void post_event(pk_kind_t kind)
 {
-    pkt_t p = { .kind = kind, .len = 0 };
+    pkt_t p = { .kind = kind, .len = 0, .conn = s_conn, .gen = s_gen };   /* ホストタスク（書き手）から呼ばれる */
     if (xQueueSend(s_rxq, &p, pdMS_TO_TICKS(100)) != pdTRUE) {
         s_ev_drops++;
         ESP_LOGE(TAG, YD_L("Could not queue a link state event (#%", "接続状態の通知をキューに入れられませんでした（%") PRIu32 YD_L(") → disconnecting", "回目）→ 切断します"), s_ev_drops);
@@ -363,7 +527,7 @@ static void transport_ready(bool ready)
     /* 切断は毎回通知する（準備完了前に届いたHELLOなどの状態も確実に消すため） */
     s_ready = ready;
     if (!ready) {
-        set_up(false);              /* 先に送信を止める */
+        link_clear_up();            /* 先に送信を止める */
         if (s_hs_timer) {
             esp_timer_stop(s_hs_timer);
         }
@@ -371,32 +535,17 @@ static void transport_ready(bool ready)
     post_event(ready ? PK_EV_READY : PK_EV_DOWN);
 }
 
-static void hs_disconnect(const char *why)
+/* rx_task の中から、いま処理しているハンドシェイクの接続を切る（古い接続の処理なら何もしない）。
+ * hs_fail: 失敗として切る（鍵の相互認証の前なら相手の BLE ボンドも消す）
+ * hs_drop: 失敗の印を付けずに切る（版の違い・取りこぼしなど。前からのボンドは残る） */
+static void hs_fail(const char *why)
 {
-    ESP_LOGE(TAG, YD_L("%s → disconnecting", "%s → 切断します"), why);
-    if (!s_up) {
-        /* 鍵の相互認証が済む前の切断（不一致・時間切れ・形のおかしい HELLO/AUTH など）は理由を問わず、
-         * 相手の BLE ボンドも消す。正しい相手ならつなぎ直したときに自動でペアリングし直す */
-        s_forget_on_disconnect = true;
-    }
-    s_closing = true;
-    set_up(false);          /* 切断が終わるのを待たずに送受信を止める（後続の通し番号を相手に送らない） */
-    uint16_t c = s_conn;
-    if (c != BLE_HS_CONN_HANDLE_NONE) {
-        ble_gap_terminate(c, BLE_ERR_AUTH_FAIL);
-    }
+    close_conn(s_hs_gen, CLOSE_HS_FAIL, why);
 }
 
-/* 失敗の印を付けずに切る（版の違い・送信の取りこぼしなど。前からのボンドは残る） */
-static void link_drop(const char *why)
+static void hs_drop(const char *why)
 {
-    ESP_LOGW(TAG, YD_L("%s → disconnecting", "%s → 切断します"), why);
-    s_closing = true;
-    set_up(false);          /* 後続のパケットを送ると、相手は抜けを改ざんとみなすので先に止める */
-    uint16_t c = s_conn;
-    if (c != BLE_HS_CONN_HANDLE_NONE) {
-        ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM);
-    }
+    close_conn(s_hs_gen, 0, why);
 }
 
 static int esp_rng(void *ctx, unsigned char *buf, size_t len)
@@ -406,10 +555,33 @@ static int esp_rng(void *ctx, unsigned char *buf, size_t len)
     return 0;
 }
 
+/* タイマーを動かす。gen の接続のため、timeout_ms 後まで */
+static void timer_arm(esp_timer_handle_t t, uint32_t *gen_slot, int64_t *due_slot, uint32_t gen, uint32_t timeout_ms)
+{
+    esp_timer_stop(t);
+    xSemaphoreTake(s_link_mutex, portMAX_DELAY);
+    *gen_slot = gen;
+    *due_slot = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+    xSemaphoreGive(s_link_mutex);
+    esp_timer_start_once(t, (uint64_t)timeout_ms * 1000);
+}
+
+/* タイマーの呼び出しが、いま動かしている分の期限によるものなら true と、その世代 */
+static bool timer_due(const uint32_t *gen_slot, const int64_t *due_slot, uint32_t *gen)
+{
+    xSemaphoreTake(s_link_mutex, portMAX_DELAY);
+    *gen = *gen_slot;
+    bool due = esp_timer_get_time() >= *due_slot - 2000;    /* 2ms の余裕（前に動かした分は何秒も前の期限） */
+    xSemaphoreGive(s_link_mutex);
+    return due;
+}
+
 static void hs_timeout_cb(void *arg)
 {
-    if (s_ready && !s_up) {
-        hs_disconnect(YD_L("Key-based mutual authentication timed out (peer firmware may be old, or it has no key)", "鍵による相互認証が時間内に終わりませんでした（相手のファームが古いか、鍵がない可能性）"));
+    uint32_t gen;
+    if (timer_due(&s_hs_timer_gen, &s_hs_timer_due_us, &gen) && s_ready) {
+        close_conn(gen, CLOSE_HS_FAIL | CLOSE_UNLESS_UP,
+                   YD_L("Key-based mutual authentication timed out (peer firmware may be old, or it has no key)", "鍵による相互認証が時間内に終わりませんでした（相手のファームが古いか、鍵がない可能性）"));
     }
 }
 
@@ -418,11 +590,10 @@ static void hs_timeout_cb(void *arg)
  * 失敗の印は付けない（前からのボンドは残し、この接続で作られたボンドは yd_bond_policy で消える） */
 static void conn_timeout_cb(void *arg)
 {
-    uint16_t c = s_conn;
-    if (c != BLE_HS_CONN_HANDLE_NONE && !s_conn_authed) {
+    uint32_t gen;
+    if (timer_due(&s_conn_timer_gen, &s_conn_timer_due_us, &gen) && close_conn(gen, CLOSE_UNLESS_AUTHED, NULL)) {
         ESP_LOGW(TAG, YD_L("Not authenticated within %d s of connecting → disconnecting",
                            "接続から %d 秒以内に相互認証が終わりませんでした → 切断します"), CONN_AUTH_TIMEOUT_MS / 1000);
-        ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM);
     }
 }
 
@@ -430,6 +601,7 @@ static void hs_reset(void)
 {
     xSemaphoreTake(s_sec_mutex, portMAX_DELAY);
     yd_sec_wipe(&s_keys, sizeof(s_keys));
+    s_keys_valid = false;
     s_tx_ctr = s_rx_ctr = 0;
     xSemaphoreGive(s_sec_mutex);
     yd_sec_wipe(s_my_nonce, sizeof(s_my_nonce));
@@ -440,11 +612,15 @@ static void hs_reset(void)
     s_hs_hello_sent = s_hs_peer_hello = s_hs_keys = s_hs_auth_sent = s_hs_peer_auth = false;
 }
 
+/* ハンドシェイクのパケットを、いま処理しているハンドシェイクの接続に送る（rx_task だけが呼ぶ）。
+ * その接続がもう切れていれば tx_task が捨てる */
 static void send_raw(const uint8_t *buf, uint16_t len)
 {
-    pkt_t p = { .kind = PK_RAW, .len = len };
+    pkt_t p = { .kind = PK_RAW, .len = len, .conn = s_hs_conn, .gen = s_hs_gen };
     memcpy(p.buf, buf, len);
-    xQueueSend(s_txq, &p, pdMS_TO_TICKS(100));
+    if (xQueueSend(s_txq, &p, pdMS_TO_TICKS(100)) != pdTRUE) {
+        hs_drop(YD_L("Could not queue a handshake packet", "ハンドシェイクのパケットを送信キューに入れられませんでした"));
+    }
 }
 
 static uint8_t my_role(void) { return s_is_central ? YD_SEC_ROLE_CENTRAL : YD_SEC_ROLE_PERIPHERAL; }
@@ -455,8 +631,8 @@ static const uint8_t *nonce_p(void) { return s_is_central ? s_peer_nonce : s_my_
 /* 揃った材料に応じて先へ進める */
 static void hs_progress(void)
 {
-    if (s_up || !s_ready || s_closing) {
-        return;
+    if (s_hs_gen != s_gen || s_up || !s_ready || s_closing) {
+        return;     /* 古い接続の分、すでに認証済み、送受信の準備前、切ると決めた */
     }
     if (s_hs_hello_sent && s_hs_peer_hello && !s_hs_keys) {
         uint8_t dh[YD_SEC_EPK_LEN];
@@ -466,7 +642,7 @@ static void hs_progress(void)
         ESP_LOGI(TAG, YD_L("X25519 key exchange: %lld ms", "X25519 の鍵交換: %lld ms"), s_x25519_us / 1000);
         if (xrc != 0) {
             yd_sec_wipe(s_my_esk, sizeof(s_my_esk));
-            hs_disconnect(YD_L("Key exchange failed (invalid public key from the peer)", "鍵交換に失敗（相手の公開鍵が不正）"));
+            hs_fail(YD_L("Key exchange failed (invalid public key from the peer)", "鍵交換に失敗（相手の公開鍵が不正）"));
             return;
         }
         yd_sec_wipe(s_my_esk, sizeof(s_my_esk));   /* 秘密鍵はもう要らない。残さないことで前方秘匿性になる */
@@ -474,12 +650,13 @@ static void hs_progress(void)
         const uint8_t *epk_p = s_is_central ? s_peer_epk : s_my_epk;
         xSemaphoreTake(s_sec_mutex, portMAX_DELAY);
         int rc = yd_sec_derive(s_psk, nonce_c(), nonce_p(), epk_c, epk_p, dh, &s_keys);
+        s_keys_valid = (rc == 0);
         s_tx_ctr = s_rx_ctr = 0;
         s_rx_overflows_seen = g_ydl_stats.rx_overflows;
         xSemaphoreGive(s_sec_mutex);
         yd_sec_wipe(dh, sizeof(dh));
         if (rc != 0) {
-            hs_disconnect(YD_L("Key derivation failed", "鍵の導出に失敗"));
+            hs_fail(YD_L("Key derivation failed", "鍵の導出に失敗"));
             return;
         }
         s_hs_keys = true;
@@ -487,7 +664,7 @@ static void hs_progress(void)
     if (s_hs_keys && !s_hs_auth_sent) {
         uint8_t m[1 + YD_SEC_MAC_LEN] = { YD_SEC_T_AUTH };
         if (yd_sec_auth_mac(&s_keys, my_role(), nonce_c(), nonce_p(), &m[1]) != 0) {
-            hs_disconnect(YD_L("Computing the AUTH MAC failed", "AUTH の MAC の計算に失敗"));
+            hs_fail(YD_L("Computing the AUTH MAC failed", "AUTH の MAC の計算に失敗"));
             return;
         }
         send_raw(m, sizeof(m));
@@ -499,22 +676,24 @@ static void hs_progress(void)
         bool ok = rc == 0 && yd_sec_equal(expect, s_peer_mac, YD_SEC_MAC_LEN);
         yd_sec_wipe(expect, sizeof(expect));
         if (rc != 0) {
-            hs_disconnect(YD_L("Computing the AUTH MAC failed", "AUTH の MAC の計算に失敗"));
+            hs_fail(YD_L("Computing the AUTH MAC failed", "AUTH の MAC の計算に失敗"));
             return;
         }
         if (!ok) {
             s_sec_fail++;
-            hs_disconnect(YD_L("Peer key does not match. Flash the same key file to both units", "相手の鍵が一致しません。2台に同じ鍵ファイルを書き込んでください"));
+            hs_fail(YD_L("Peer key does not match. Flash the same key file to both units", "相手の鍵が一致しません。2台に同じ鍵ファイルを書き込んでください"));
             return;
         }
-        esp_timer_stop(s_hs_timer);
-        esp_timer_stop(s_conn_timer);
-        s_conn_authed = true;
-        if (s_is_central && !s_have_target && s_peer_addr_valid) {
-            target_save(&s_peer_addr);   /* 鍵の相互認証が通った相手だけを登録する */
-            print_addr(YD_L("Registered this desk unit:", "この机上ユニットを登録しました:"), &s_peer_addr);
+        ble_addr_t peer;
+        bool peer_valid;
+        if (!link_authed(s_hs_gen, &peer, &peer_valid)) {
+            return;     /* 計算している間に切れた（または切ると決めた）。この接続はもう使わない */
         }
-        set_up(true);
+        if (s_is_central && !s_have_target && peer_valid) {
+            target_save(&peer);          /* 鍵の相互認証が通った相手だけを登録する */
+            print_addr(YD_L("Registered this desk unit:", "この机上ユニットを登録しました:"), &peer);
+        }
+        notify_state();
     }
 }
 
@@ -527,7 +706,7 @@ static void send_hello(void)
     s_x25519_us = esp_timer_get_time() - t0;
     if (rc != 0) {
         yd_sec_wipe(s_my_esk, sizeof(s_my_esk));
-        hs_disconnect(YD_L("Could not create the X25519 key", "X25519 の鍵を作れませんでした"));
+        hs_fail(YD_L("Could not create the X25519 key", "X25519 の鍵を作れませんでした"));
         return;
     }
     uint8_t m[YD_SEC_HELLO_LEN];
@@ -542,14 +721,13 @@ static void send_hello(void)
 static void hs_begin(void)
 {
     if (!s_have_psk) {
-        hs_disconnect(YD_L("No key (keyrelay-key.bin) has been flashed", "鍵（keyrelay-key.bin）が書き込まれていません"));
+        hs_fail(YD_L("No key (keyrelay-key.bin) has been flashed", "鍵（keyrelay-key.bin）が書き込まれていません"));
         return;
     }
     if (!s_hs_hello_sent && (s_is_central || s_hs_peer_hello)) {
         send_hello();   /* 机上ユニット: 準備が整う前にレシーバーの HELLO が届いていたら、ここで返す */
     }
-    esp_timer_stop(s_hs_timer);
-    esp_timer_start_once(s_hs_timer, (uint64_t)HS_TIMEOUT_MS * 1000);
+    timer_arm(s_hs_timer, &s_hs_timer_gen, &s_hs_timer_due_us, s_hs_gen, HS_TIMEOUT_MS);
     hs_progress();
 }
 
@@ -569,11 +747,11 @@ static void on_packet(const pkt_t *p)
             ESP_LOGE(TAG, YD_L("The peer speaks KeyRelay link protocol v%u, this firmware v%u. Flash the same KeyRelay version to both units",
                                "相手は KeyRelay のリンクの版 v%u、このファームは v%u です。2台に同じ版の KeyRelay を書き込んでください"),
                      ver, YD_SEC_VERSION);
-            link_drop(YD_L("Protocol version mismatch", "版の違い"));
+            hs_drop(YD_L("Protocol version mismatch", "版の違い"));
             return;
         }
         if (hr != YD_SEC_HELLO_OK) {
-            hs_disconnect(YD_L("Malformed HELLO", "不正なHELLO"));
+            hs_fail(YD_L("Malformed HELLO", "不正なHELLO"));
             return;
         }
         s_hs_peer_hello = true;
@@ -585,7 +763,7 @@ static void on_packet(const pkt_t *p)
     }
     case YD_SEC_T_AUTH:
         if (p->len != 1 + YD_SEC_MAC_LEN || s_hs_peer_auth) {
-            hs_disconnect(YD_L("Malformed AUTH", "不正なAUTH"));
+            hs_fail(YD_L("Malformed AUTH", "不正なAUTH"));
             return;
         }
         memcpy(s_peer_mac, &p->buf[1], YD_SEC_MAC_LEN);
@@ -598,6 +776,10 @@ static void on_packet(const pkt_t *p)
         }
         uint32_t ctr = 0;
         xSemaphoreTake(s_sec_mutex, portMAX_DELAY);
+        if (!s_keys_valid) {
+            xSemaphoreGive(s_sec_mutex);
+            return;     /* この接続の鍵がない（消した直後など）。消した鍵（0）で読まない */
+        }
         int n = yd_sec_open(s_is_central ? s_keys.k_p2c : s_keys.k_c2p, p->buf, p->len, &ctr, pt, sizeof(pt));
         uint32_t expect = s_rx_ctr + 1;
         bool next = (n >= 1) && ctr == expect;     /* 1 ずつ増えるものだけ（抜き取り・並べ替えも検出） */
@@ -607,28 +789,31 @@ static void on_packet(const pkt_t *p)
         xSemaphoreGive(s_sec_mutex);
         if (n < 1) {
             s_sec_fail++;
-            hs_disconnect(YD_L("Received tampered or corrupted data", "改ざんされたか壊れたデータを受信"));
+            hs_fail(YD_L("Received tampered or corrupted data", "改ざんされたか壊れたデータを受信"));
             return;
         }
         if (!next) {
+            yd_sec_wipe(pt, sizeof(pt));
             if (ctr > expect && g_ydl_stats.rx_overflows != s_rx_overflows_seen) {
                 /* 自分の受信キューが一杯で捨てた分。データが欠けたので、つなぎ直して揃える */
-                link_drop(YD_L("A packet was lost (receive queue full)", "パケットを取りこぼしました（受信キューが一杯）"));
+                hs_drop(YD_L("A packet was lost (receive queue full)", "パケットを取りこぼしました（受信キューが一杯）"));
             } else {
                 s_sec_fail++;
-                hs_disconnect(ctr < expect ? YD_L("Received data with an old sequence number (possible replay)", "古い通し番号のデータを受信（リプレイの疑い）")
+                hs_fail(ctr < expect ? YD_L("Received data with an old sequence number (possible replay)", "古い通し番号のデータを受信（リプレイの疑い）")
                                            : YD_L("A packet is missing (lost on the way, or removed by an attacker)", "パケットが抜けています（途中で失われたか、攻撃で抜き取られた）"));
             }
             return;
         }
         g_ydl_stats.rx_frames++;
         if (s_cfg.rx_cb) {
+            /* rx_cb は同期で、必要なら中身を自分のキューにコピーしてから戻る */
             s_cfg.rx_cb(pt[0], &pt[1], (uint16_t)(n - 1), s_cfg.rx_cb_arg);
         }
+        yd_sec_wipe(pt, sizeof(pt));   /* 復号した平文を残さない */
         return;
     }
     default:
-        hs_disconnect(YD_L("Received unencrypted data (peer firmware may be old)", "暗号化されていないデータを受信（相手のファームが古い可能性）"));
+        hs_fail(YD_L("Received unencrypted data (peer firmware may be old)", "暗号化されていないデータを受信（相手のファームが古い可能性）"));
         return;
     }
 }
@@ -659,7 +844,7 @@ static bool load_psk(void)
  * ====================================================================== */
 static void push_rx(struct os_mbuf *om)
 {
-    pkt_t p = { .kind = PK_DATA };
+    pkt_t p = { .kind = PK_DATA, .conn = s_conn, .gen = s_gen };   /* ホストタスク（書き手）から呼ばれる */
     uint16_t n = 0;
     if (ble_hs_mbuf_to_flat(om, p.buf, sizeof(p.buf), &n) != 0 || n < 1) {
         g_ydl_stats.rx_overflows++;
@@ -676,30 +861,46 @@ static void rx_task(void *arg)
     static pkt_t p;
     for (;;) {
         xQueueReceive(s_rxq, &p, portMAX_DELAY);
-        switch (p.kind) {
-        case PK_EV_READY: hs_begin(); break;
-        case PK_EV_DOWN:  hs_reset(); break;
-        default:          on_packet(&p); break;
+        if (p.kind == PK_EV_DOWN) {
+            hs_reset();
+            link_keys_gone(p.gen);
+            continue;
+        }
+        if (p.gen != s_gen) {
+            continue;   /* 切断より前に届いた古い接続の分は、新しい接続として扱わない */
+        }
+        if (p.gen != s_hs_gen) {
+            /* 新しい接続の最初の通知かパケット。前の接続の状態は持ち越さない（EV_DOWN を取りこぼしていても） */
+            hs_reset();
+            s_hs_gen = p.gen;
+            s_hs_conn = p.conn;
+        }
+        if (p.kind == PK_EV_READY) {
+            hs_begin();
+        } else {
+            on_packet(&p);
         }
     }
 }
 
-static int send_one(const uint8_t *buf, uint16_t len)
+/* tx_task が s_link_mutex を持ったまま呼ぶ。通知の送信は、このタスクの中で GAP の NOTIFY_TX を呼ぶ
+ * （gap_event_periph はそのイベントで何もしない） */
+static int send_one(uint16_t conn, const uint8_t *buf, uint16_t len)
 {
     if (s_is_central) {
-        return ble_gattc_write_no_rsp_flat(s_conn, s_peer_to_desk, buf, len);
+        return ble_gattc_write_no_rsp_flat(conn, s_peer_to_desk, buf, len);
     }
     struct os_mbuf *om = ble_hs_mbuf_from_flat(buf, len);
     if (!om) {
         return BLE_HS_ENOMEM;
     }
-    return ble_gatts_notify_custom(s_conn, s_to_recv_val, om);   /* omは成否に関わらず消費される */
+    return ble_gatts_notify_custom(conn, s_to_recv_val, om);   /* omは成否に関わらず消費される */
 }
 
 /* 1パケットに使える長さ（ATT の MTU と BLE_PKT_MAX の小さいほう） */
-static size_t wire_cap(void)
+static size_t wire_cap(uint16_t conn)
 {
-    uint16_t mtu = ble_att_mtu(s_conn);
+    uint16_t mtu = ble_att_mtu(conn);
     size_t wire = BLE_PKT_MAX;
     if (mtu > 3 && (size_t)mtu - 3 < wire) {
         wire = (size_t)mtu - 3;
@@ -718,33 +919,50 @@ static void tx_task(void *arg)
         }
         const uint8_t *buf = p.buf;
         uint16_t len = p.len;
+        if (p.gen != s_gen) {
+            /* 切断までに送れなかった古い接続の分。新しい接続には送らない */
+            if (p.kind != PK_RAW) {
+                g_ydl_stats.tx_dropped++;
+            }
+            yd_sec_wipe(p.buf, p.len);
+            continue;
+        }
         if (p.kind == PK_RAW) {
             if (!s_ready) {
                 continue;
             }
         } else {
-            if (!s_up) {
-                g_ydl_stats.tx_dropped++;
-                continue;
-            }
-            size_t cap = wire_cap();
+            size_t cap = wire_cap(p.conn);
             xSemaphoreTake(s_sec_mutex, portMAX_DELAY);
             int n = -1;
-            if (s_tx_ctr < UINT32_MAX) {
+            /* 鍵が有効か・接続が同じかは、鍵を消す hs_reset と同じロックの中で確かめる */
+            bool live = s_up && s_keys_valid && p.gen == s_gen;
+            if (live && s_tx_ctr < UINT32_MAX) {
                 n = yd_sec_seal(s_is_central ? s_keys.k_c2p : s_keys.k_p2c, ++s_tx_ctr, p.buf, p.len, out, cap);
             }
             xSemaphoreGive(s_sec_mutex);
+            yd_sec_wipe(p.buf, p.len);   /* 平文の控えを残さない */
+            if (!live) {
+                g_ydl_stats.tx_dropped++;
+                continue;
+            }
             if (n < 0) {
                 g_ydl_stats.tx_dropped++;
-                hs_disconnect(YD_L("Encryption failed", "暗号化に失敗"));
+                close_conn(p.gen, 0, YD_L("Encryption failed", "暗号化に失敗"));
                 continue;
             }
             buf = out;
             len = (uint16_t)n;
         }
-        int rc = 0;
+        int rc = BLE_HS_ENOTCONN;
+        bool gone = false;
         for (int retry = 0; retry < 200; retry++) {      /* 送信バッファが空くまで最大約400ms */
-            rc = send_one(buf, len);
+            /* 世代の確認と送信をまとめて排他する。途中で切断・再接続されても別の接続には送らず、
+             * 切ると決めた後は送らない（後続の通し番号を相手に送らない） */
+            xSemaphoreTake(s_link_mutex, portMAX_DELAY);
+            gone = (p.gen != s_gen || s_closing);
+            rc = gone ? BLE_HS_ENOTCONN : send_one(p.conn, buf, len);
+            xSemaphoreGive(s_link_mutex);
             if (rc != BLE_HS_ENOMEM && rc != BLE_HS_EBUSY) {
                 break;
             }
@@ -754,13 +972,15 @@ static void tx_task(void *arg)
             if (p.kind != PK_RAW) {
                 g_ydl_stats.tx_frames++;
             }
+        } else if (gone) {
+            g_ydl_stats.tx_dropped++;    /* 切れた・切ると決めた接続の分 */
         } else {
             g_ydl_stats.tx_dropped++;
             ESP_LOGW(TAG, YD_L("Send failed rc=%d", "送信失敗 rc=%d"), rc);
-            if (p.kind != PK_RAW && s_up) {
-                /* 通し番号を使ったのに届かなかった。相手は抜けを改ざんとみなすので、先につなぎ直す */
-                link_drop(YD_L("A packet could not be sent", "パケットを送れませんでした"));
-            }
+            /* データ: 通し番号を使ったのに届かなかった。相手は抜けを改ざんとみなすので、先につなぎ直す。
+             * ハンドシェイク: このままでは時間切れ（＝失敗扱い）になるので、失敗の印を付けずにつなぎ直す */
+            close_conn(p.gen, 0, p.kind == PK_RAW ? YD_L("A handshake packet could not be sent", "ハンドシェイクのパケットを送れませんでした")
+                                                  : YD_L("A packet could not be sent", "パケットを送れませんでした"));
         }
     }
 }
@@ -770,23 +990,26 @@ esp_err_t ydl_ble_send(uint8_t ch, const uint8_t *data, uint16_t len)
     if (!s_txq) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (!s_up) {
-        return ESP_ERR_INVALID_STATE;
-    }
     if (len > BLE_PKT_MAX - 1 - YD_SEC_OVERHEAD - YD_SEC_PAD_MIN) {   /* 16bit の足し算があふれる前に弾く */
         ESP_LOGE(TAG, YD_L("Payload too large len=%u", "ペイロードが大きすぎます len=%u"), len);
         return ESP_ERR_INVALID_SIZE;
     }
-    size_t cap = wire_cap();
+    pkt_t p = { .kind = PK_DATA, .len = len + 1 };
+    if (!link_snapshot(&p.conn, &p.gen)) {
+        return ESP_ERR_INVALID_STATE;   /* 相互認証の済んだ接続がない */
+    }
+    size_t cap = wire_cap(p.conn);
     if (yd_sec_sealed_len((size_t)len + 1, cap) == 0) {
         ESP_LOGE(TAG, YD_L("Payload too large len=%u mtu=%u", "ペイロードが大きすぎます len=%u mtu=%u"), len, (unsigned)(cap + 3));
         return ESP_ERR_INVALID_SIZE;
     }
-    pkt_t p = { .kind = PK_DATA, .len = len + 1 };
     p.buf[0] = ch;
     memcpy(&p.buf[1], data, len);
     cp_on_traffic();
-    return xQueueSend(s_txq, &p, pdMS_TO_TICKS(50)) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+    esp_err_t err = xQueueSend(s_txq, &p, pdMS_TO_TICKS(50)) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+    /* 平文の控えを残さない。キューの中の写しは、tx_task が取り出したあとも次に使われるまで残る（SECURITY.md） */
+    yd_sec_wipe(&p, sizeof(p));
+    return err;
 }
 
 uint16_t ydl_ble_max_payload(void)
@@ -794,7 +1017,7 @@ uint16_t ydl_ble_max_payload(void)
     if (!s_up) {
         return 0;
     }
-    size_t wire = wire_cap();
+    size_t wire = wire_cap(s_conn);
     return wire > 1 + YD_SEC_OVERHEAD + YD_SEC_PAD_MIN ? (uint16_t)(wire - 1 - YD_SEC_OVERHEAD - YD_SEC_PAD_MIN) : 0;
 }
 
@@ -888,26 +1111,25 @@ static void periph_advertise(void)
     }
 }
 
-/* 接続した直後に呼ぶ。この接続の前からボンドがあった相手かを覚えておく */
+/* 接続した（ホストタスク）。新しい世代を始め、この接続の前からボンドがあった相手かを覚えておく */
 static void conn_begin(uint16_t conn)
 {
     struct ble_gap_conn_desc desc;
-    s_forget_on_disconnect = false;
-    s_conn_authed = false;
-    s_closing = false;
-    s_peer_addr_valid = false;
+    link_begin(conn);
     s_conn_was_bonded = ble_gap_conn_find(conn, &desc) == 0 && peer_is_bonded(&desc.peer_id_addr);
-    esp_timer_stop(s_conn_timer);
-    esp_timer_start_once(s_conn_timer, (uint64_t)CONN_AUTH_TIMEOUT_MS * 1000);
+    timer_arm(s_conn_timer, &s_conn_timer_gen, &s_conn_timer_due_us, s_gen, CONN_AUTH_TIMEOUT_MS);
 }
 
-static void forget_failed_peer(void)
+/* 切れた（ホストタスク）。世代を進め、認証前に失敗した相手などの BLE ボンドを消す */
+static void conn_end(void)
 {
+    bool authed = false, hs_failed = false;
+    link_end(&authed, &hs_failed);
     yd_bond_conn_t c = {
         .peer_known = s_peer_addr_valid,
         .bonded_before_conn = s_conn_was_bonded,
-        .authed = s_conn_authed,
-        .hs_failed = s_forget_on_disconnect,
+        .authed = authed,
+        .hs_failed = hs_failed,
     };
     esp_timer_stop(s_conn_timer);
     if (yd_bond_forget_on_disconnect(&c)) {
@@ -924,10 +1146,7 @@ static void forget_failed_peer(void)
                        &s_peer_addr);
         }
     }
-    s_forget_on_disconnect = false;
-    s_conn_authed = false;
     s_conn_was_bonded = false;
-    s_peer_addr_valid = false;
 }
 
 /* ボンドの保存先がいっぱいのとき。NimBLE 標準の ble_store_util_status_rr は一番古い相手を
@@ -957,8 +1176,7 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
             periph_advertise();
             return 0;
         }
-        s_conn = event->connect.conn_handle;
-        conn_begin(s_conn);
+        conn_begin(event->connect.conn_handle);
         s_encrypted = false;
         s_subscribed = false;
         cp_reset(false);
@@ -974,8 +1192,7 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, YD_L("Disconnected reason=0x%x", "切断 reason=0x%x"), event->disconnect.reason);
-        forget_failed_peer();
-        s_conn = BLE_HS_CONN_HANDLE_NONE;
+        conn_end();
         s_encrypted = false;
         s_subscribed = false;
         transport_ready(false);
@@ -987,8 +1204,7 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
         if (event->enc_change.status == 0 && ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
             s_encrypted = desc.sec_state.encrypted;
             ESP_LOGI(TAG, YD_L("Encryption %s (bonded=%d)", "暗号化 %s（bonded=%d）"), s_encrypted ? "OK" : "NG", desc.sec_state.bonded);
-            s_peer_addr = desc.peer_id_addr;
-            s_peer_addr_valid = true;
+            link_set_peer(&desc.peer_id_addr);
             /* ボンディング済みの相手は購読状態が復元済みのことがある */
             if (s_encrypted && s_subscribed) {
                 transport_ready(true);
@@ -1057,6 +1273,10 @@ static int gap_event_periph(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
         periph_advertise();
+        return 0;
+
+    case BLE_GAP_EVENT_NOTIFY_TX:
+        /* 通知を送った tx_task の中から、s_link_mutex を持ったまま同期で呼ばれる。ここでロックを取らない */
         return 0;
     }
     return 0;
@@ -1230,8 +1450,7 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
             central_scan();
             return 0;
         }
-        s_conn = event->connect.conn_handle;
-        conn_begin(s_conn);
+        conn_begin(event->connect.conn_handle);
         s_encrypted = false;
         s_svc_start = s_svc_end = s_peer_to_desk = s_peer_to_recv = 0;
         ble_gattc_exchange_mtu(s_conn, on_mtu, NULL);
@@ -1246,8 +1465,7 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
             ESP_LOGW(TAG, YD_L("The desk unit refused our HELLO. It may run an older KeyRelay version: update both units (the desk unit first)",
                                "机上ユニットがこちらの HELLO を受け付けませんでした。古い版の KeyRelay の可能性があります。2台とも更新してください（机上ユニットから）"));
         }
-        forget_failed_peer();
-        s_conn = BLE_HS_CONN_HANDLE_NONE;
+        conn_end();
         s_encrypted = false;
         transport_ready(false);
         central_scan();
@@ -1257,8 +1475,7 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
         if (event->enc_change.status == 0 && ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
             s_encrypted = desc.sec_state.encrypted;
             ESP_LOGI(TAG, YD_L("Encryption %s (bonded=%d)", "暗号化 %s（bonded=%d）"), s_encrypted ? "OK" : "NG", desc.sec_state.bonded);
-            s_peer_addr = desc.peer_id_addr;
-            s_peer_addr_valid = true;
+            link_set_peer(&desc.peer_id_addr);
             if (!s_have_target) {
                 print_addr(YD_L("First peer (registered once key authentication succeeds):", "初回の相手（鍵の相互認証が通ったら登録します）:"), &desc.peer_id_addr);
             }
@@ -1361,7 +1578,9 @@ esp_err_t ydl_ble_init(const yd_link_config_t *cfg)
     ESP_RETURN_ON_ERROR(err, TAG, "nvs");
 
     s_sec_mutex = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(s_sec_mutex, ESP_ERR_NO_MEM, TAG, "mutex");
+    s_link_mutex = xSemaphoreCreateMutex();
+    s_state_mutex = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_sec_mutex && s_link_mutex && s_state_mutex, ESP_ERR_NO_MEM, TAG, "mutex");
     const esp_timer_create_args_t ta = { .callback = hs_timeout_cb, .name = "yd_hs" };
     ESP_RETURN_ON_ERROR(esp_timer_create(&ta, &s_hs_timer), TAG, "timer");
     const esp_timer_create_args_t tc = { .callback = conn_timeout_cb, .name = "yd_conn" };
