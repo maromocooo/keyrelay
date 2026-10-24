@@ -91,6 +91,7 @@ CFG_TUSB_MEM_SECTION CFG_TUSB_MEM_ALIGN static uint8_t s_ctrl_buf[KBD_REPORT_LEN
 CFG_TUSB_MEM_SECTION CFG_TUSB_MEM_ALIGN static uint8_t s_get_buf[KBD_REPORT_LEN];
 static uint8_t s_small[1];
 static SemaphoreHandle_t s_in_sem;
+static volatile xfer_result_t s_in_result;   /* キーボードの IN 転送の結果（s_in_sem を渡す前に書く） */
 
 /* ---- 保留中の GET_REPORT(Feature)（TinyUSB タスクで書き換え） ---- */
 static volatile bool s_get_pending;
@@ -182,6 +183,7 @@ static void otpd_reset(uint8_t rhport)
     }
     s_get_pending = false;
     s_protocol = 1;
+    s_in_result = XFER_RESULT_FAILED;
     if (s_in_sem) {
         xSemaphoreGive(s_in_sem);
     }
@@ -329,6 +331,7 @@ static bool otpd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, 
     } else if (ep_addr == s_fido_ep_in) {
         xSemaphoreGive(s_fido_sem);
     } else if (ep_addr == s_ep_in) {
+        s_in_result = result;
         xSemaphoreGive(s_in_sem);
     }
     return true;
@@ -385,6 +388,9 @@ bool hid_dev_fido_send(const uint8_t *report, uint32_t timeout_ms)
 /* ======================================================================
  *  キー入力 → Mac
  * ====================================================================== */
+/* Mac が受け取ったら true。送り始められない、完了しない、完了したが失敗した、のどれも false（ModHex フィルターは
+ * 送った文字を数えているので、届いたか分からないものを届いたことにしない）。完了を待ちきれなかった転送が
+ * あとで終わっても、その文字は届かなかったものとして扱う（そのまとまりを捨てるほうに倒れる） */
 static bool kbd_send(const uint8_t *d)
 {
     TickType_t start = xTaskGetTickCount();
@@ -393,8 +399,7 @@ static bool kbd_send(const uint8_t *d)
             memcpy(s_in_buf, d, KBD_REPORT_LEN);
             xSemaphoreTake(s_in_sem, 0);
             if (usbd_edpt_xfer(0, s_ep_in, s_in_buf, KBD_REPORT_LEN, false)) {
-                xSemaphoreTake(s_in_sem, pdMS_TO_TICKS(100));
-                return true;
+                return xSemaphoreTake(s_in_sem, pdMS_TO_TICKS(100)) == pdTRUE && s_in_result == XFER_RESULT_SUCCESS;
             }
             usbd_edpt_release(0, s_ep_in);
         }
@@ -457,7 +462,7 @@ static void kbd_task(void *arg)
         }
 #endif
         if (!kbd_send(r.d)) {
-            ESP_LOGW(TAG, YD_L("Keyboard send timed out (not connected to the host?)", "キーボードの送信待ちタイムアウト（Macに未接続？）"));
+            ESP_LOGW(TAG, YD_L("Keyboard report not delivered (not connected to the host?)", "キーボードのレポートを Mac に届けられませんでした（Macに未接続？）"));
 #if CONFIG_YD_OTP_KBD_FILTER_MODHEX
             s_kbd_epoch++;
             continue;                   /* Mac が見ている状態は変わっていない（押したままなら KBD_STUCK_MS で離す） */
