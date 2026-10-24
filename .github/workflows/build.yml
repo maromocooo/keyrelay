@@ -43,6 +43,8 @@ jobs:
             variant: uart-download
           - project: receiver
             variant: no-keyboard
+          - project: receiver
+            variant: any-key
           - project: desk_unit
             variant: log-ja
           - project: receiver
@@ -68,6 +70,9 @@ jobs:
           if [ "${{ matrix.variant }}" = "no-keyboard" ]; then
             echo "CONFIG_YD_OTP_KEYBOARD=n" >> sdkconfig.defaults
           fi
+          if [ "${{ matrix.variant }}" = "any-key" ]; then
+            echo "CONFIG_YD_OTP_KBD_FILTER_NONE=y" >> sdkconfig.defaults
+          fi
           if [ "${{ matrix.variant }}" = "log-ja" ]; then
             echo "CONFIG_YD_LOG_LANG_JA=y" >> sdkconfig.defaults
           fi
@@ -76,3 +81,6 @@ jobs:
           fi
           idf.py set-target esp32s3
           idf.py build merge-bin -o "keyrelay_${{ matrix.project }}_full.bin"
+          if [ "${{ matrix.variant }}" = "any-key" ]; then
+            grep -q '^CONFIG_YD_OTP_KBD_FILTER_NONE=y' sdkconfig   # the choice really switched to "any key"
+          fi
