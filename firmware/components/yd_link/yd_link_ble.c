@@ -1460,11 +1460,8 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, YD_L("Disconnected reason=0x%x", "切断 reason=0x%x"), event->disconnect.reason);
-        if (s_hs_hello_sent && !s_hs_peer_hello && event->disconnect.reason == BLE_HS_HCI_ERR(BLE_ERR_AUTH_FAIL)) {
-            /* v1 の机上ユニットは v2 の HELLO を「形がおかしい」として切るだけで、版を名乗らない */
-            ESP_LOGW(TAG, YD_L("The desk unit refused our HELLO. It may run an older KeyRelay version: update both units (the desk unit first)",
-                               "机上ユニットがこちらの HELLO を受け付けませんでした。古い版の KeyRelay の可能性があります。2台とも更新してください（机上ユニットから）"));
-        }
+        /* 古い版の机上ユニット（固定の UUID）は、もう見つけて接続することがないので、ここでの版のヒントは不要
+         * （見つけたときは hint_unmatched_adv が知らせる） */
         conn_end();
         s_encrypted = false;
         transport_ready(false);
