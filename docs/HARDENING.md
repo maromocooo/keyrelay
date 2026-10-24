@@ -34,6 +34,25 @@ Flash encryption in *development* mode is **not** enough: its ROM download mode 
 and that code can read the decrypted flash. This guide therefore uses release mode with secure download
 mode.
 
+### What it does not stop
+
+- **A stolen unit being used.** Hardening keeps the PSK from being read out of a unit, but a stolen unit
+  is still a working KeyRelay unit and can still talk to your other units. Revoke it by changing the PSK
+  on all the others ([SECURITY.md](../SECURITY.md), "If a unit is lost or stolen").
+- **Physical attacks on the chip.** The ESP32-S3 has no glitch detection. Espressif's advisory
+  [AR2026-005](https://documentation.espressif.com/AR2026-005_Security_Advisory_Concerning_AES_Key_Recovery_Using_Voltage_Fault_Injection_on%20ESP32-S3_EN.html)
+  describes recovering AES-128 keys from the ESP32-S3's general-purpose AES accelerator by voltage fault
+  injection on an opened board. KeyRelay uses that accelerator with AES-256 keys, for the per-connection
+  link keys and for NVS encryption; flash encryption uses a separate engine. On other Espressif chips,
+  fault injection has bypassed secure boot and flash encryption
+  ([AR2023-005](https://documentation.espressif.com/AR2023-005%20Security%20Advisory%20Concerning%20Bypassing%20Secure%20Boot%20and%20Flash%20Encryption%20Using%20EMFI%20EN.html)
+  for the ESP32, AR2023-007 for the ESP32-C3 and C6). Hardening turns "a few minutes with a USB cable"
+  into a lab attack on a board someone has taken away; it does not make a stolen unit safe.
+- **Exposed key material.** Anyone who has a unit's flash encryption key and gets hold of the unit can
+  read its flash chip directly and decrypt it, PSK and bonds included. The key cannot be changed
+  afterwards (it is in eFuses). If it was exposed, treat that unit as not hardened: keep it where you
+  would keep the security key, or replace it.
+
 ### Who generates the flash encryption key
 
 - **On your computer (this guide).** You can still update the unit over USB/UART, by flashing images you
@@ -94,7 +113,9 @@ signed": that is expected, signing happens in step 6. The three files you need a
 ## 2. Keys
 
 Keep all keys outside the repository, and make an offline backup (for example in a password manager).
-The names below match `.gitignore` patterns, in case one ends up in the working tree by mistake.
+The names below match `.gitignore` patterns, in case one ends up in the working tree by mistake. Never
+paste a key file's contents (or its base64) into a chat, an issue, a support request or an AI assistant;
+treat a key that was pasted anywhere as exposed.
 
 ```sh
 mkdir -p ~/keyrelay-secrets && cd ~/keyrelay-secrets
@@ -239,6 +260,10 @@ esptool --chip esp32s3 -p PORT --no-stub write-flash --flash-mode keep --flash-f
 ```
 
 If esptool stops with a safety check, verify the offset and add `--force`.
+
+To change the pairing key (PSK), run `make_images.sh` with the new `keyrelay-key.bin` and flash
+`ydkey-enc.bin` at `0x190000` the same way, then erase the BLE pairing (BOOT for 3 s). Do the same on every
+unit.
 
 For the desk unit with its case closed, use the serial-console download command (needs
 `YD_UART_DOWNLOAD_CMD 1`, BUILD.md section 9) and add `--before no-reset` after `-p PORT`. On a hardened

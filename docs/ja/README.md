@@ -28,8 +28,10 @@ Chrome の `chrome://settings/securityKeys` でのパスキー管理。
 
 ### ykman・Yubico Authenticator・KeePassXC
 
-これらのツールは、Yubico の USB ベンダー ID を持つ機器としか通信しません。KeyRelay は自前の USB ID を
-使い、他社の名前や ID は名乗らないので、**今のところこれらのツールからは見えません**。そのため、
+これらのツールは、Yubico の USB ベンダー ID を持つ機器を探します。ykman は `--reader` で選んだ
+スマートカードリーダーも使えますが、YubiKey の機種をリーダーの名前（「Yubico YubiKey OTP+FIDO+CCID」など）から
+決めるので、KeyRelay のリーダーでは「Failed to connect to YubiKey」で止まります。KeyRelay は自前の USB ID と
+名前を使い、他社の名前や ID は名乗らないので、**今のところこれらのツールでは使えません**。そのため、
 OATH のコード（Yubico Authenticator / ykman）、PIV の管理（ykman）、OTP のチャレンジレスポンス
 （KeePassXC）は使えません。
 

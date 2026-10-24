@@ -778,7 +778,10 @@ static void handle_mac_packet(uint8_t *pkt)
     portENTER_CRITICAL(&s_lock);
     int i = tab_find_v(cid);
     if (i < 0) {
-        /* 机上ユニット再起動前に払い出したCIDなど。そのまま仮想CIDとして引き継ぐ */
+        /* 机上ユニット再起動前に払い出したCIDなど。そのまま仮想CIDとして引き継ぐ。
+         * 仕様では知らない CID は ERR_INVALID_CHANNEL だが、机上ユニットが再起動・再接続しても、パソコン側の
+         * アプリ（ブラウザなど）が INIT し直さずに同じ CID を使い続けられるよう、わざと受け入れる。
+         * 受け入れても他のチャンネルを乗っ取れるようにはならない（使用中の CID は、その対応表の行に当たる） */
         i = tab_take_slot(cid, &evicted);
         adopted = true;
     }

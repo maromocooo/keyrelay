@@ -34,6 +34,25 @@
 コードを読み込ませると、そのコードは復号されたフラッシュを読めるからです。そのため、この手順では
 Release モードとセキュアダウンロードモードを使います。
 
+### 守れないもの
+
+- **盗まれた機器をそのまま使われること。** 固めると PSK は機器から読み出せなくなりますが、盗まれた機器も
+  KeyRelay の機器としてそのまま動き、あなたのほかの機器と通信できます。締め出すには、ほかの全部の機器の PSK を
+  変えます（[SECURITY.md](SECURITY.md) の「機器をなくしたり、盗まれたりしたら」）。
+- **チップへの物理的な攻撃。** ESP32-S3 にはグリッチの検出がありません。Espressif の
+  [AR2026-005](https://documentation.espressif.com/AR2026-005_Security_Advisory_Concerning_AES_Key_Recovery_Using_Voltage_Fault_Injection_on%20ESP32-S3_EN.html)
+  は、基板を開けて電源電圧のフォールト注入を行い、ESP32-S3 の汎用の AES アクセラレーターから AES-128 の鍵を
+  取り出す方法を説明しています。KeyRelay はこのアクセラレーターを、接続ごとのリンクの鍵と NVS 暗号化に
+  AES-256 で使います（フラッシュ暗号化は別の回路です）。ほかの Espressif のチップでは、フォールト注入で
+  セキュアブートとフラッシュ暗号化が破られています（ESP32 の
+  [AR2023-005](https://documentation.espressif.com/AR2023-005%20Security%20Advisory%20Concerning%20Bypassing%20Secure%20Boot%20and%20Flash%20Encryption%20Using%20EMFI%20EN.html)、
+  ESP32-C3 と C6 の AR2023-007）。固めることで「USB ケーブルで数分」が「持ち去った基板への研究室レベルの
+  攻撃」に変わりますが、盗まれた機器が安全になるわけではありません。
+- **鍵が人目に触れたとき。** 機器のフラッシュ暗号化の鍵を持つ人がその機器を手に入れると、フラッシュの
+  チップを直接読んで復号できます（PSK もペアリング情報も）。この鍵は eFuse にあるので、あとから変えられません。
+  人目に触れたなら、その機器は固めていないものとして扱ってください。キーと同じように手元で管理するか、
+  別の基板に替えます。
+
 ### フラッシュ暗号化の鍵を誰が作るか
 
 - **自分のパソコンで作る（この手順）。** その機器の鍵で暗号化したイメージを書き込めば、あとから USB / UART で
@@ -95,7 +114,9 @@ idf.py -C firmware/desk_unit -B firmware/desk_unit/build-hardened \
 ## 2. 鍵を作る
 
 鍵はすべてリポジトリの外に置き、オフラインのバックアップ（パスワードマネージャーなど）も取ってください。
-下のファイル名は、間違って作業ツリーに置いても `.gitignore` で弾かれる名前にしてあります。
+下のファイル名は、間違って作業ツリーに置いても `.gitignore` で弾かれる名前にしてあります。鍵ファイルの
+中身（や、その base64）は、チャット・Issue・問い合わせ・AI アシスタントに貼り付けないでください。どこかに
+貼った鍵は、人目に触れたものとして扱います。
 
 ```sh
 mkdir -p ~/keyrelay-secrets && cd ~/keyrelay-secrets
@@ -242,6 +263,10 @@ esptool --chip esp32s3 -p ポート --no-stub write-flash --flash-mode keep --fl
 ```
 
 esptool が安全のための確認で止まったら、アドレスを確かめてから `--force` を付けます。
+
+ペアリング用の鍵（PSK）を変えるときは、新しい `keyrelay-key.bin` で `make_images.sh` を実行し、
+`ydkey-enc.bin` を同じように `0x190000` に書いてから、BLE のペアリング情報を消します（BOOT を3秒）。
+これを全部の機器で行います。
 
 ケースを閉じたままの机上ユニットは、シリアルコンソールのダウンロードコマンド（`YD_UART_DOWNLOAD_CMD 1`、
 BUILD.md の9章）を使い、`-p ポート` のあとに `--before no-reset` を足します。固めた機器では、この方法の危険は

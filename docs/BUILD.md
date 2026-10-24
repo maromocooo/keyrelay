@@ -165,6 +165,8 @@ use (see SECURITY.md).
 
 Within a few seconds the two units pair over BLE. The key's LED lights up and the desk unit's log
 shows the key's interfaces being claimed (FIDO, CCID, OTP keyboard) and the BLE link coming up.
+Both units log `Link ID xxxxxxxx (must be the same on both units)` at boot. If they do not find each
+other, compare the two values: different values mean different pairing keys.
 Log messages are in English. For Japanese, select it in `idf.py menuconfig` → KeyRelay log
 language before building (both projects).
 
@@ -209,25 +211,30 @@ Assembly order (looking into the open body from below):
 - **macOS "Keyboard Setup Assistant"** appears once because the receiver includes a keyboard. Close it.
 - **Japanese input:** before typing an OTP, the receiver sends the 英数 (LANG2) key so the OTP is not
   converted by a Japanese IME. The input mode stays alphanumeric afterwards.
-- **ykman, Yubico Authenticator and KeePassXC do not detect KeyRelay**: they only accept Yubico's USB
-  IDs (see the README).
+- **ykman, Yubico Authenticator and KeePassXC do not work with KeyRelay**: they identify a YubiKey by
+  Yubico's USB IDs or by its reader name (see the README).
 - **Only one application can hold the smart card at a time.** If gpg or another tool cannot connect,
   run `gpgconf --kill scdaemon` and try again.
 - For GnuPG, `~/.gnupg/scdaemon.conf` with `disable-ccid` and `pcsc-shared` makes gpg use the macOS
   smart-card service and share the card with other tools.
-- **The receiver only types Yubico OTPs by default** (ModHex letters and Enter). If a slot types a
+- **The receiver only types Yubico OTPs by default** (32 to 64 ModHex letters, then Enter). If a slot types a
   static password, OATH-HOTP digits or uses the Tab options, build the receiver with
   menuconfig → KeyRelay → "Keys the OTP keyboard may type" → "Any key". Blocked keys are logged. See
-  SECURITY.md for why.
+  SECURITY.md for why. If a slot types its OTP without Enter, wait a second between two touches: input
+  less than a second apart counts as one OTP, so the second one would be cut off.
 - **Turn off NFC on the key if you do not use it.** A key left on the desk answers any phone held
   against it. Plug the key directly into a computer and run `ykman config nfc --disable-all`.
 
 ## 9. Updating the desk unit
 
-**Update both units together, the desk unit first.** The two units must speak the same link protocol
-version. A desk unit that meets another version logs it; an older desk unit cannot tell, so the receiver
-only logs a hint ("The desk unit refused our HELLO"). After both are updated they pair again by
-themselves if needed.
+**Update both units together.** The two units must run the same KeyRelay version. Since the BLE service
+UUID became derived from the pairing key, a unit with older firmware (fixed UUID) does not even see a
+newer one. Updating the receiver first is a little more convenient: until the desk unit is updated too,
+the receiver logs that it sees a desk unit with older firmware. If the receiver keeps scanning after an
+update, check that both units log the same `Link ID` (a unit that logs none still runs older firmware);
+the receiver also says so when it sees its registered desk unit advertising another Link ID. Units that
+do find each other but speak different link protocol versions log the versions and disconnect. After
+both are updated they pair again by themselves if needed.
 
 Flash only the app at `0x10000`. The key at `0x190000` and the BLE pairing stay.
 
