@@ -197,6 +197,23 @@ int yd_sec_derive(const uint8_t psk[YD_SEC_KEY_LEN], const uint8_t nc[YD_SEC_NON
     return rc;
 }
 
+int yd_sec_gatt_uuid(const uint8_t psk[YD_SEC_KEY_LEN], uint8_t kind, uint8_t out[YD_SEC_GATT_UUID_LEN])
+{
+    static const char label[] = "keyrelay v2 gatt uuid";
+    uint8_t msg[sizeof(label)];                 /* ラベル（終端の 0 なし）＋ kind */
+    memcpy(msg, label, sizeof(label) - 1);
+    msg[sizeof(label) - 1] = kind;
+    uint8_t full[32] = { 0 };
+    int rc = hmac256(psk, YD_SEC_KEY_LEN, msg, sizeof(msg), full);
+    if (rc == 0) {
+        memcpy(out, full, YD_SEC_GATT_UUID_LEN);
+    } else {
+        memset(out, 0, YD_SEC_GATT_UUID_LEN);
+    }
+    yd_sec_wipe(full, sizeof(full));
+    return rc;
+}
+
 int yd_sec_auth_mac(const yd_sec_keys_t *k, uint8_t role, const uint8_t nc[YD_SEC_NONCE_LEN],
                     const uint8_t np[YD_SEC_NONCE_LEN], uint8_t mac_out[YD_SEC_MAC_LEN])
 {

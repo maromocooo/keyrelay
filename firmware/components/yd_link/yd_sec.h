@@ -84,6 +84,16 @@ int yd_sec_derive(const uint8_t psk[YD_SEC_KEY_LEN], const uint8_t nc[YD_SEC_NON
                   const uint8_t np[YD_SEC_NONCE_LEN], const uint8_t epk_c[YD_SEC_EPK_LEN],
                   const uint8_t epk_p[YD_SEC_EPK_LEN], const uint8_t dh[YD_SEC_EPK_LEN], yd_sec_keys_t *out);
 
+/* BLE で互いを見つけるための GATT の UUID（16バイト）。kind = YD_SEC_GATT_*。
+ * HMAC-SHA256(PSK, "keyrelay v2 gatt uuid" || kind) の先頭16バイト。同じ PSK の機器だけが同じ値になり、
+ * ほかの人には KeyRelay だと分からない（3つの UUID の間にも決まった関係はない）。
+ * サービスの UUID の先頭4バイトを「Link ID」としてログに出す */
+#define YD_SEC_GATT_UUID_LEN 16
+#define YD_SEC_GATT_SVC      0     /* サービス */
+#define YD_SEC_GATT_TO_DESK  1     /* レシーバー → 机上（Write Without Response） */
+#define YD_SEC_GATT_TO_RECV  2     /* 机上 → レシーバー（Notify） */
+int yd_sec_gatt_uuid(const uint8_t psk[YD_SEC_KEY_LEN], uint8_t kind, uint8_t out[YD_SEC_GATT_UUID_LEN]);
+
 /* role が自分の確認コードを作る（失敗時は mac_out を 0 で埋めて 0 以外を返す） */
 int yd_sec_auth_mac(const yd_sec_keys_t *k, uint8_t role, const uint8_t nc[YD_SEC_NONCE_LEN],
                     const uint8_t np[YD_SEC_NONCE_LEN], uint8_t mac_out[YD_SEC_MAC_LEN]);

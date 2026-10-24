@@ -57,14 +57,15 @@ void ble_store_config_init(void);
 #define TXQ_DEPTH          48
 #define RXQ_DEPTH          48
 #define RXQ_EV_RESERVE     4            /* 受信データで埋めず、接続・切断の通知用に空けておく枠 */
-#define DEVICE_NAME        "KeyRelay"
 
-/* 128bit UUID（リトルエンディアン）: 7d1e0000-5c4a-4f6e-9b2d-59d0c0ffee01 系 */
-#define YD_UUID(last) BLE_UUID128_INIT(0x01, 0xee, 0xff, 0xc0, 0xd0, 0x59, 0x2d, 0x9b, \
-                                       0x6e, 0x4f, 0x4a, 0x5c, last, 0x00, 0x1e, 0x7d)
-static const ble_uuid128_t UUID_SVC     = YD_UUID(0x00);
-static const ble_uuid128_t UUID_TO_DESK = YD_UUID(0x01);
-static const ble_uuid128_t UUID_TO_RECV = YD_UUID(0x02);
+/* 128bit UUID は PSK から作る（yd_sec_gatt_uuid。3つとも別のラベルから）。固定の UUID や名前を出すと、
+ * 電波を見るだけで「ここに KeyRelay がある」と分かるため。起動時の ydl_ble_init で埋める */
+static ble_uuid128_t UUID_SVC     = { .u = { .type = BLE_UUID_TYPE_128 } };
+static ble_uuid128_t UUID_TO_DESK = { .u = { .type = BLE_UUID_TYPE_128 } };
+static ble_uuid128_t UUID_TO_RECV = { .u = { .type = BLE_UUID_TYPE_128 } };
+/* 古い版（固定の UUID を出していたころ）の机上ユニットのサービス。見つけたらログで知らせるだけで、つながない */
+static const ble_uuid128_t UUID_LEGACY_SVC = BLE_UUID128_INIT(0x01, 0xee, 0xff, 0xc0, 0xd0, 0x59, 0x2d, 0x9b,
+                                                              0x6e, 0x4f, 0x4a, 0x5c, 0x00, 0x00, 0x1e, 0x7d);
 
 #define HS_TIMEOUT_MS      5000          /* 暗号化・購読の後、この時間内に相互認証が終わらなければ切断 */
 #define CONN_AUTH_TIMEOUT_MS 15000       /* 接続してから、この時間内に相互認証まで終わらなければ切断 */
@@ -872,11 +873,7 @@ static void periph_advertise(void)
         ESP_LOGE(TAG, "adv fields rc=%d", rc);
         return;
     }
-    struct ble_hs_adv_fields rsp = { 0 };
-    rsp.name = (uint8_t *)DEVICE_NAME;
-    rsp.name_len = strlen(DEVICE_NAME);
-    rsp.name_is_complete = 1;
-    ble_gap_adv_rsp_set_fields(&rsp);
+    /* 名前は出さない（スキャン応答なし） */
 
     struct ble_gap_adv_params p = { 0 };
     p.conn_mode = BLE_GAP_CONN_MODE_UND;
@@ -1083,18 +1080,50 @@ static void central_scan(void)
     }
 }
 
-static bool adv_has_our_svc(const struct ble_gap_disc_desc *d)
+static bool adv_has_uuid(const struct ble_gap_disc_desc *d, const ble_uuid128_t *uuid)
 {
     struct ble_hs_adv_fields f;
     if (ble_hs_adv_parse_fields(&f, d->data, d->length_data) != 0) {
         return false;
     }
     for (int i = 0; i < f.num_uuids128; i++) {
-        if (ble_uuid_cmp(&f.uuids128[i].u, &UUID_SVC.u) == 0) {
+        if (ble_uuid_cmp(&f.uuids128[i].u, &uuid->u) == 0) {
             return true;
         }
     }
     return false;
+}
+
+static bool adv_has_our_svc(const struct ble_gap_disc_desc *d)
+{
+    return adv_has_uuid(d, &UUID_SVC);
+}
+
+/* 自分の UUID を出していない広告のうち、古い版の机上ユニット（固定の UUID）か、登録済みの机上ユニットの
+ * アドレスのものなら、つながらない理由をログに出す（30秒に1回まで）。UUID が PSK から作られるので、
+ * 版や鍵の違う机上ユニットとは接続して確かめることができないため */
+static void hint_unmatched_adv(const struct ble_gap_disc_desc *d)
+{
+    static int64_t last_us;
+    bool legacy = adv_has_uuid(d, &UUID_LEGACY_SVC);
+    bool target = s_have_target && ble_addr_cmp(&d->addr, &s_target) == 0;
+    int64_t now = esp_timer_get_time();
+    if ((!legacy && !target) || (last_us && now - last_us < 30 * 1000000LL)) {
+        return;
+    }
+    last_us = now;
+    if (legacy) {
+        ESP_LOGW(TAG, YD_L("A desk unit with older KeyRelay firmware (fixed service UUID) is advertising nearby. "
+                           "Older and newer firmware do not see each other: update it",
+                           "古い版の KeyRelay の机上ユニット（固定のサービス UUID）が近くでアドバタイズしています。"
+                           "古い版と新しい版は互いに見えないので、机上ユニットを更新してください"));
+        print_addr(YD_L("Address:", "アドレス:"), &d->addr);
+    } else {
+        ESP_LOGW(TAG, YD_L("The registered desk unit is advertising, but not with this unit's Link ID: it has a different "
+                           "key file (or other firmware). Compare the Link ID lines in both logs",
+                           "登録済みの机上ユニットがアドバタイズしていますが、このレシーバーのリンク ID ではありません。"
+                           "鍵ファイル（またはファームの版）が違います。2台のログのリンク ID を見比べてください"));
+    }
 }
 
 static void central_connect(const ble_addr_t *addr)
@@ -1182,6 +1211,7 @@ static int gap_event_central(struct ble_gap_event *event, void *arg)
     switch (event->type) {
     case BLE_GAP_EVENT_DISC:
         if (!adv_has_our_svc(&event->disc)) {
+            hint_unmatched_adv(&event->disc);
             return 0;
         }
         if (s_have_target && ble_addr_cmp(&event->disc.addr, &s_target) != 0) {
@@ -1337,6 +1367,16 @@ esp_err_t ydl_ble_init(const yd_link_config_t *cfg)
     const esp_timer_create_args_t tc = { .callback = conn_timeout_cb, .name = "yd_conn" };
     ESP_RETURN_ON_ERROR(esp_timer_create(&tc, &s_conn_timer), TAG, "timer");
     s_have_psk = load_psk();
+    if (s_have_psk) {
+        bool ok = yd_sec_gatt_uuid(s_psk, YD_SEC_GATT_SVC, UUID_SVC.value) == 0 &&
+                  yd_sec_gatt_uuid(s_psk, YD_SEC_GATT_TO_DESK, UUID_TO_DESK.value) == 0 &&
+                  yd_sec_gatt_uuid(s_psk, YD_SEC_GATT_TO_RECV, UUID_TO_RECV.value) == 0;
+        ESP_RETURN_ON_FALSE(ok, ESP_FAIL, TAG, "gatt uuid");
+        /* 2台で同じ鍵を使っているかを見比べる手がかり（電波に出ている値の一部なので、表示しても問題ない） */
+        const uint8_t *id = UUID_SVC.value;
+        ESP_LOGI(TAG, YD_L("Link ID %02x%02x%02x%02x (must be the same on both units)", "リンク ID %02x%02x%02x%02x（2台で同じになるはず）"),
+                 id[0], id[1], id[2], id[3]);
+    }
 
     s_txq = xQueueCreate(TXQ_DEPTH, sizeof(pkt_t));
     s_rxq = xQueueCreate(RXQ_DEPTH, sizeof(pkt_t));
@@ -1368,7 +1408,7 @@ esp_err_t ydl_ble_init(const yd_link_config_t *cfg)
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
-    ble_svc_gap_device_name_set(s_is_central ? "KeyRelay-Recv" : DEVICE_NAME);
+    ble_svc_gap_device_name_set("");   /* 接続した相手に読まれる GAP の名前も空にする */
     ble_att_set_preferred_mtu(247);
 
     if (!s_is_central) {
