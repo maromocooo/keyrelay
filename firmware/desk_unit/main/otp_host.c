@@ -20,7 +20,8 @@
  * チャレンジレスポンス（KeePassXC など）やスロット設定（ykman otp）は、キーボードの口への
  * GET_REPORT / SET_REPORT（Feature, 8バイト）で行う。レシーバーが Mac から受けた要求を1つずつ送ってくるので、
  * 制御転送でそのまま YubiKey に出し、GET の結果を返す。ただし SET は、キーを書き換えるコマンド（スロットの設定など）
- * を止める（otp_ctl_filter.h）。KeyRelay 越しにはスロットを設定できない。
+ * を止める（otp_ctl_filter.h）。KeyRelay 越しにはスロットを設定できない。要求は届いた接続のもので、切れた接続の
+ * 要求は出さず、GET の結果はその接続にだけ返す。
  */
 #include <string.h>
 #include <inttypes.h>
@@ -50,6 +51,7 @@ static const char *TAG = "otp";
 typedef struct {
     uint8_t op, tag;
     uint8_t d[YD_OTPCTL_REPORT_LEN];
+    uint32_t conn;                  /* 届いた接続（yd_link_conn_id） */
 } ctl_req_t;
 
 static QueueHandle_t s_ctl_q;
@@ -313,6 +315,9 @@ static void ctl_task(void *arg)
     int64_t last_log = 0;
     for (;;) {
         xQueueReceive(s_ctl_q, &r, portMAX_DELAY);
+        if (r.conn != yd_link_conn_id()) {
+            continue;                   /* 切れた接続の要求。返す相手がいないし、新しい接続の続きとして出さない */
+        }
         xSemaphoreTake(s_ctl_mutex, portMAX_DELAY);
         bool ok = false;
         uint8_t cmd;
@@ -330,7 +335,7 @@ static void ctl_task(void *arg)
             ok = ctl_xfer(true, d);
             uint8_t resp[3 + YD_OTPCTL_REPORT_LEN] = { YD_OTPCTL_GET_RESP, r.tag, ok ? 1 : 0 };
             memcpy(&resp[3], d, YD_OTPCTL_REPORT_LEN);
-            yd_link_send(YD_CH_OTPCTL, resp, sizeof(resp));
+            yd_link_send_on(r.conn, YD_CH_OTPCTL, resp, sizeof(resp));
         }
         xSemaphoreGive(s_ctl_mutex);
         s_ctl_count++;
@@ -344,7 +349,7 @@ static void ctl_task(void *arg)
 
 void otph_ctl_from_link(const uint8_t *data, uint16_t len)
 {
-    ctl_req_t r = { 0 };
+    ctl_req_t r = { .conn = yd_link_conn_id() };
     if (len == 1 + YD_OTPCTL_REPORT_LEN && data[0] == YD_OTPCTL_SET) {
         r.op = YD_OTPCTL_SET;
         memcpy(r.d, data + 1, YD_OTPCTL_REPORT_LEN);
