@@ -2,9 +2,11 @@
 
 [English](../HARDENING.md)
 
-> **状態: パソコン上では確かめましたが、実機ではまだです。** 固めたビルドの設定で2台ともビルドできること
-> （CI でも確認）、署名と暗号化のスクリプトがテスト用の鍵で動くこと、下の eFuse の手順が仮想の ESP32-S3
-> （`espefuse --virt`）で最後まで通ることは確かめました。KeyRelay の実機では、まだ誰も試していません。
+> **状態: レシーバーの実機で確認済み。** レシーバー（Freenove ESP32-S3、チップ revision v0.2、esptool v5.6、
+> 2026-10-24）でこの手順を最後まで行い、セキュアブート・Release モードのフラッシュ暗号化・NVS 暗号化・
+> セキュアダウンロードモードで起動すること、フラッシュの読み出しが拒否されること、そのレシーバー越しに
+> FIDO・OpenPGP・OTP が動くことを確かめました。机上ユニットも設定と手順は同じですが、実機ではまだ固めて
+> いません。固めたビルドの設定は、2台とも CI でもビルドしています。
 >
 > eFuse の操作は**どれも元に戻せません**。間違えると、二度と起動しない基板や、二度と更新できない基板に
 > なることがあります。**必ず予備の基板で最後まで一度試してください。** Espressif の公式ドキュメントが、
@@ -150,8 +152,9 @@ espefuse --chip esp32s3 -p ポート burn-efuse SECURE_BOOT_EN 1 SOFT_DIS_JTAG 7
 espefuse --chip esp32s3 -p ポート write-protect-efuse RD_DIS
 ```
 
-任意: 2つ目の署名鍵を足すことがないなら、使わない2つの枠を無効にします
-（`burn-efuse SECURE_BOOT_KEY_REVOKE1 1 SECURE_BOOT_KEY_REVOKE2 1`）。`SECURE_BOOT_AGGRESSIVE_REVOKE` は
+使わない2つの署名鍵の枠は、無効にしなくてかまいません。最初の起動でファームが自分で無効にします
+（`Unused SECURE_BOOT_DIGEST1 should be revoked. Fixing..`）。それ以降、その機器が受け付ける鍵は
+`secure-boot-key.pem` だけになるので、バックアップは大切に保管してください。`SECURE_BOOT_AGGRESSIVE_REVOKE` は
 **書かないでください**。鍵が1つしかないと、検証に失敗したイメージ1つでその鍵が無効になり、二度と
 起動しなくなります。
 
@@ -173,9 +176,11 @@ firmware/hardening/make_images.sh $B/bootloader/bootloader.bin $B/keyrelay_desk_
 
 「Signature block 0 is valid」の2行に出る公開鍵のダイジェストが、`secure-boot-digest.bin` と同じかを
 確かめます（`xxd -p secure-boot-digest.bin`）。そのあと、表示された「First flash」のコマンドを実行します。
+`--after no-reset` を付けると書き込みのあとも起動しないので、最初の起動の前にログを開けます。stub を使わないので、
+書き込みには1分ちょっとかかります（約 80kbit/s）。
 
 ```sh
-esptool --chip esp32s3 -p ポート --no-stub write-flash --flash-mode keep --flash-freq keep --flash-size keep --force \
+esptool --chip esp32s3 -p ポート --no-stub --after no-reset write-flash --flash-mode keep --flash-freq keep --flash-size keep --force \
   0x0 ~/keyrelay-secrets/images-desk/bootloader-enc.bin 0x10000 ~/keyrelay-secrets/images-desk/partition-table-enc.bin \
   0x20000 ~/keyrelay-secrets/images-desk/app-enc.bin 0x190000 ~/keyrelay-secrets/images-desk/ydkey-enc.bin
 ```
@@ -183,20 +188,25 @@ esptool --chip esp32s3 -p ポート --no-stub write-flash --flash-mode keep --fl
 - `--flash-mode keep --flash-freq keep --flash-size keep`: 暗号化・署名済みのブートローダーのヘッダーを
   esptool に書き換えさせないため。
 - `--force`: セキュアブートが有効なチップのブートローダーの領域には、これがないと esptool が書き込みません。
+  ファイルごとに `Security features enabled, so not changing any flash settings.` と出ますが、それで正常です。
 - `nvs_key` パーティション（`0x18000`）は、わざと消去したままにします。NVS の鍵はファームが最初の起動で作ります。
 
 この時点ならまだセキュアダウンロードモードになっていないので、間違えても書き直せます。
 
 ## 7. 最初の起動と確認
 
-機器をリセットして、ログを見ます。机上ユニットは CP2102N のコンソール（配線前なら、KeyRelay がポートを
-USB ホストに切り替えるまでは XIAO の USB にも出ます）、レシーバーは COM 側で、どちらも 115200bps です。
-次が出れば成功です。
+ログを開いてから（`tio -b 115200 ポート`。机上ユニットは CP2102N のコンソール、レシーバーは COM 側）、
+リセットボタンを押します。固めたレシーバーでは、次の順に出ました。
 
-- ブートローダー: `secure boot v2 is already enabled, continuing..`、`Verifying image signature...`、
-  `Flash encryption mode is RELEASE`、`Enabling Security download mode...`
-- KeyRelay: `NVS partition "nvs" is encrypted.`、`Key loaded (0x190000)`、そのあといつものペアリングと
-  `▶ BLE link up`
+- ROM: `secure boot verification succeeded`
+- ブートローダー: `Verifying with RSA-PSS...`、`Signature verified successfully!`、
+  `secure boot v2 is already enabled, continuing..`、`flash encryption is enabled (0 plaintext flashes left)`
+- アプリ: `Flash encryption mode is RELEASE`、`Unused SECURE_BOOT_DIGEST1 should be revoked. Fixing..`
+  （`DIGEST2` も）、`Generating NVS encr-keys...`、`NVS partition "nvs" is encrypted.`、`Key loaded (0x190000)`、
+  そのあといつものペアリングと `▶ BLE link up`
+- `failed to load RF calibration data` が一度だけ出ます。NVS が空から始まるためで、問題ありません。
+
+セキュアダウンロードモードも、この起動の間にファームが有効にします（専用のログは出ません）。
 
 パソコンからも確かめます。
 
@@ -204,8 +214,11 @@ USB ホストに切り替えるまでは XIAO の USB にも出ます）、レ�
 esptool --chip esp32s3 -p ポート --no-stub get-security-info
 ```
 
-セキュアブートとフラッシュ暗号化が有効で、セキュアダウンロードモードがオンになっているはずです。
-続けて、ペアリング用の鍵を読み出してみます。これは**失敗しなければいけません**。
+`Chip type: ESP32-S3 in Secure Download Mode`、`Secure Boot: Enabled`（Key1 と Key2 は Revoked）、
+`Flash Encryption: Enabled`、`SPI Boot Crypt Count (SPI_BOOT_CRYPT_CNT): 0x7`、UART ダウンロードモードの
+キャッシュが2つとも Disabled、`JTAG: Permanently Disabled` と出れば成功です。続けて、ペアリング用の鍵を
+読み出してみます。これは `The 'read-flash' command is not available in Secure Download Mode.` で
+**失敗しなければいけません**。
 
 ```sh
 esptool --chip esp32s3 -p ポート --no-stub read-flash 0x190000 0x1000 should-fail.bin
@@ -244,5 +257,5 @@ BUILD.md の9章）を使い、`-p ポート` のあとに `--before no-reset` �
   いまのファームのまま動き続けます。
 - **ここに書いたことは、どれも元に戻せません。** 固めるのをやめたい機器は、取り替えるしかありません。
 
-試した人は、うまくいったこと（いかなかったこと）を Issue で教えてください。このページに
-「実機で確認済み」と書けるようにしたいです。
+机上ユニットを固めた人や、別の基板で試した人は、うまくいったこと（いかなかったこと）を Issue で
+教えてください。

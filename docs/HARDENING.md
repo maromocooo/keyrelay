@@ -2,10 +2,11 @@
 
 [日本語](ja/HARDENING.md)
 
-> **Status: verified on a computer, not yet on a unit.** The hardened build configuration compiles for both
-> units (also in CI), the signing and encryption script was run with test keys, and the eFuse sequence
-> below was rehearsed on a virtual ESP32-S3 (`espefuse --virt`). Nobody has run it on real KeyRelay
-> hardware yet.
+> **Status: verified on a receiver.** The whole procedure was run on a receiver (Freenove ESP32-S3,
+> chip revision v0.2, esptool v5.6, 2026-10-24): it boots with secure boot, release-mode flash encryption,
+> NVS encryption and secure download mode, flash readout is refused, and FIDO, OpenPGP and OTP work through
+> it. The desk unit uses the same configuration and steps but has not been hardened on hardware yet. The
+> hardened configuration also builds in CI for both units.
 >
 > Every eFuse step is **permanent**. A mistake can leave a board that never boots again, or one you can
 > no longer update. **Do the whole procedure on a spare board first.** Espressif's documentation takes
@@ -150,8 +151,9 @@ espefuse --chip esp32s3 -p PORT burn-efuse SECURE_BOOT_EN 1 SOFT_DIS_JTAG 7
 espefuse --chip esp32s3 -p PORT write-protect-efuse RD_DIS
 ```
 
-Optional: if you will never add a second signing key, revoke the two unused slots
-(`burn-efuse SECURE_BOOT_KEY_REVOKE1 1 SECURE_BOOT_KEY_REVOKE2 1`). Do **not** burn
+You do not need to revoke the two unused digest slots: on its first boot the firmware does it itself
+(`Unused SECURE_BOOT_DIGEST1 should be revoked. Fixing..`). From then on `secure-boot-key.pem` is the
+only key that unit will ever accept, so keep its backup safe. Do **not** burn
 `SECURE_BOOT_AGGRESSIVE_REVOKE`: with a single key, one image that fails verification would revoke that
 key and the unit could never boot again.
 
@@ -171,17 +173,20 @@ firmware/hardening/make_images.sh $B/bootloader/bootloader.bin $B/keyrelay_desk_
 ```
 
 Check that both "Signature block 0 is valid" lines show the same public key digest as
-`secure-boot-digest.bin` (`xxd -p secure-boot-digest.bin`). Then run the printed "First flash" command:
+`secure-boot-digest.bin` (`xxd -p secure-boot-digest.bin`). Then run the printed "First flash" command.
+`--after no-reset` keeps the chip in the bootloader, so you can open the log before the first boot. Without
+the stub, writing takes a little over a minute (about 80 kbit/s).
 
 ```sh
-esptool --chip esp32s3 -p PORT --no-stub write-flash --flash-mode keep --flash-freq keep --flash-size keep --force \
+esptool --chip esp32s3 -p PORT --no-stub --after no-reset write-flash --flash-mode keep --flash-freq keep --flash-size keep --force \
   0x0 ~/keyrelay-secrets/images-desk/bootloader-enc.bin 0x10000 ~/keyrelay-secrets/images-desk/partition-table-enc.bin \
   0x20000 ~/keyrelay-secrets/images-desk/app-enc.bin 0x190000 ~/keyrelay-secrets/images-desk/ydkey-enc.bin
 ```
 
 - `--flash-mode keep --flash-freq keep --flash-size keep`: esptool must not touch the bootloader header,
   which is encrypted and signed.
-- `--force`: esptool refuses to write the bootloader area of a chip with secure boot otherwise.
+- `--force`: esptool refuses to write the bootloader area of a chip with secure boot otherwise. It prints
+  `Security features enabled, so not changing any flash settings.` for each file, which is expected.
 - The `nvs_key` partition (`0x18000`) stays erased on purpose: the firmware creates the NVS keys on the
   first boot.
 
@@ -189,13 +194,18 @@ If something is wrong, you can still flash again at this point: secure download 
 
 ## 7. First boot and checks
 
-Reset the unit and watch its log (desk unit: the CP2102N console; receiver: the COM port), 115200 baud.
-Expected:
+Open the log (`tio -b 115200 PORT`; desk unit: the CP2102N console; receiver: the COM port), then press
+the reset button. Expected, in this order (from the receiver that was hardened):
 
-- bootloader: `secure boot v2 is already enabled, continuing..`, `Verifying image signature...`,
-  `Flash encryption mode is RELEASE`, `Enabling Security download mode...`
-- KeyRelay: `NVS partition "nvs" is encrypted.`, `Key loaded (0x190000)`, then the usual pairing and
-  `▶ BLE link up`
+- ROM: `secure boot verification succeeded`
+- bootloader: `Verifying with RSA-PSS...`, `Signature verified successfully!`,
+  `secure boot v2 is already enabled, continuing..`, `flash encryption is enabled (0 plaintext flashes left)`
+- app: `Flash encryption mode is RELEASE`, `Unused SECURE_BOOT_DIGEST1 should be revoked. Fixing..` (and
+  `DIGEST2`), `Generating NVS encr-keys...`, `NVS partition "nvs" is encrypted.`, `Key loaded (0x190000)`,
+  then the usual pairing and `▶ BLE link up`
+- `failed to load RF calibration data` appears once, because NVS starts empty. It is harmless.
+
+The firmware also turns on secure download mode during this boot, without a log line of its own.
 
 Then check from the computer:
 
@@ -203,8 +213,10 @@ Then check from the computer:
 esptool --chip esp32s3 -p PORT --no-stub get-security-info
 ```
 
-It must report secure boot and flash encryption enabled and secure download mode on. Then try to read the
-pairing key back; this **must fail**:
+Expected: `Chip type: ESP32-S3 in Secure Download Mode`, `Secure Boot: Enabled` with key 1 and key 2
+revoked, `Flash Encryption: Enabled`, `SPI Boot Crypt Count (SPI_BOOT_CRYPT_CNT): 0x7`, both caches in UART
+download mode disabled, `JTAG: Permanently Disabled`. Then try to read the pairing key back; this **must
+fail** with `The 'read-flash' command is not available in Secure Download Mode.`:
 
 ```sh
 esptool --chip esp32s3 -p PORT --no-stub read-flash 0x190000 0x1000 should-fail.bin
@@ -242,5 +254,5 @@ write flash but not read it, and anything it writes must be signed and encrypted
   It keeps running the firmware it has.
 - **Nothing here can be undone.** A unit you do not want hardened anymore can only be replaced.
 
-If you try this, please report what worked (and what did not) in an issue, so this page can say
-"verified on hardware".
+If you harden a desk unit, or use another board, please report what worked (and what did not) in an
+issue.
