@@ -20,7 +20,7 @@
 | FIDO2 / U2F（パスキー、WebAuthn） | 64バイトの CTAPHID レポート | 使える: webauthn.io で登録・認証（Chrome） |
 | OpenPGP（GnuPG） | CCID（スマートカード）のメッセージ | 使える: `gpg --card-status` |
 | タッチで打たれる OTP | キーボードのレポート（タッチ1回分を決まった並びで送る。既定は Yubico OTP のキーだけ） | 使える: demo.yubico.com で Yubico OTP が有効と判定 |
-| PIV・OATH | CCID（スマートカード）のメッセージ | 中継はする。下の Yubico のツールの注意を参照 |
+| PIV・OATH | CCID（スマートカード）のメッセージ | `tools/keyrelay_ykman.py` 経由の ykman で使える: `info`、`piv info`、`oath accounts add / code / delete`（ykman 5.9.2） |
 | OTP のチャレンジレスポンス | HID のフィーチャーレポートを1回ずつ往復 | 中継はする。下の Yubico のツールの注意を参照。スロットや設定を書き換えるコマンドは止める（[SECURITY.md](SECURITY.md)） |
 
 まだ確かめていないもの: PIV / OpenPGP での署名、一般的な PC/SC のソフト（OpenSC など）からの PIV、
@@ -28,16 +28,28 @@ Chrome の `chrome://settings/securityKeys` でのパスキー管理。
 
 ### ykman・Yubico Authenticator・KeePassXC
 
-これらのツールは、Yubico の USB ベンダー ID を持つ機器を探します。ykman は `--reader` で選んだ
-スマートカードリーダーも使えますが、YubiKey の機種をリーダーの名前（「Yubico YubiKey OTP+FIDO+CCID」など）から
-決めるので、KeyRelay のリーダーでは「Failed to connect to YubiKey」で止まります。KeyRelay は自前の USB ID と
-名前を使い、他社の名前や ID は名乗らないので、**今のところこれらのツールでは使えません**。そのため、
-OATH のコード（Yubico Authenticator / ykman）、PIV の管理（ykman）、OTP のチャレンジレスポンス
-（KeePassXC）は使えません。
+これらのツールは、Yubico の USB ベンダー ID を持つ機器を探します。KeyRelay は自前の USB ID と名前を使い、
+他社の名前や ID は名乗りません。
 
-pid.codes で専用の USB ID が取れたら、各ツールに対応してもらうよう提案する予定です。
-- **ykman:** 名前が「Yubico YubiKey」でない PC/SC リーダー経由でも、機種の情報を読めるようにしてもらう
-- **KeePassXC:** KeyRelay の ID を、対応機器の一覧に足してもらう
+- **ykman:** [`tools/keyrelay_ykman.py`](../../tools/keyrelay_ykman.py) 経由で、スマートカードの口を使うコマンド
+  （`info`、`piv`、`oath`、`openpgp`、`config`）が使えます。ykman は `--reader` で選んだリーダーも使えますが、
+  YubiKey の機種をリーダーの名前（「Yubico YubiKey OTP+FIDO+CCID」など）から決めるので、KeyRelay のリーダーでは
+  「Failed to connect to YubiKey」で止まります。このスクリプトは、自分のプロセスの中でだけ、名前に「KeyRelay」を
+  含むリーダーをどの機種とみなすかを ykman に教えてから、ふつうの ykman を動かします。ykman が入っている
+  Python で実行してください。
+
+  ```sh
+  # Homebrew で入れた ykman の場合（リポジトリの一番上で実行）
+  ykr() { "$(brew --prefix ykman)/libexec/bin/python" tools/keyrelay_ykman.py --reader KeyRelay "$@"; }
+  ykr info
+  ykr piv info
+  ykr oath accounts code
+  ```
+
+  `ykman otp` と `ykman fido` は、スマートカードのリーダーではなく別の USB の口を使うので、使えません。
+  ykman の内部の関数を差し替えているので、ykman を更新すると動かなくなることがあります（確かめた版: 5.9.2）。
+- **Yubico Authenticator（GUI）と KeePassXC** は、今のところ使えません。pid.codes で専用の USB ID が取れたら、
+  KeePassXC に、KeyRelay の ID を対応機器の一覧に足してもらうよう提案する予定です。
 
 ブラウザ（FIDO）・GnuPG・OTP の入力は、そのまま使えます。
 
