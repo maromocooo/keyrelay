@@ -275,9 +275,10 @@ Notes for flashing through the CP2102N:
 ## 10. BOOT buttons and pairing a different unit
 
 - **Receiver:** holding BOOT for 3 s clears its BLE bonds (as soon as 3 s have passed).
-- **Desk unit:** holding BOOT for 3 s and releasing clears its bonds. A **short** press stops or restarts
-  the key's USB bus. That resets the smart card, so PIV/OpenPGP PINs must be entered again. The desk
-  unit's BOOT button is inside the case.
+- **Desk unit:** holding BOOT for 3 s and releasing clears its bonds. Clear the receiver's bonds too:
+  a receiver keeps its registered desk unit's bond and does not pair with it again on its own. A
+  **short** press stops or restarts the key's USB bus. That resets the smart card, so PIV/OpenPGP PINs
+  must be entered again. The desk unit's BOOT button is inside the case.
 - A desk unit with no bond, or within 120 s of booting, accepts a new receiver. To pair a new receiver
   without opening the case, power-cycle the desk unit. Either way, both units must share the same
   pairing key.

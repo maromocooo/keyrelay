@@ -21,7 +21,7 @@
 | OpenPGP（GnuPG） | CCID（スマートカード）のメッセージ | 使える: `gpg --card-status` |
 | タッチで打たれる OTP | キーボードのレポート（タッチ1回分を決まった並びで送る。既定は Yubico OTP のキーだけ） | 使える: demo.yubico.com で Yubico OTP が有効と判定 |
 | PIV・OATH | CCID（スマートカード）のメッセージ | 中継はする。下の Yubico のツールの注意を参照 |
-| OTP のチャレンジレスポンス・スロット設定 | HID のフィーチャーレポートを1回ずつ往復 | 中継はする。下の Yubico のツールの注意を参照 |
+| OTP のチャレンジレスポンス | HID のフィーチャーレポートを1回ずつ往復 | 中継はする。下の Yubico のツールの注意を参照。スロットや設定を書き換えるコマンドは止める（[SECURITY.md](SECURITY.md)） |
 
 まだ確かめていないもの: PIV / OpenPGP での署名、一般的な PC/SC のソフト（OpenSC など）からの PIV、
 Chrome の `chrome://settings/securityKeys` でのパスキー管理。
