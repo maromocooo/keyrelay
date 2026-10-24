@@ -35,10 +35,20 @@ Two independent layers:
    bond while it has no bond yet or during the first 120 s after boot. Just Works cannot stop a
    man-in-the-middle during that pairing moment, which is why layer 2 exists. The receiver only
    remembers a desk unit after the layer-2 handshake succeeds. Both units delete the BLE bond of any
-   peer that fails or times out in that handshake, and of any peer that paired during this connection
-   but disconnected (by itself, too) before completing it. When the bond store is full, no existing
-   bond is evicted to make room. A device without the PSK therefore cannot make the receiver stick to
-   it, keep the desk unit's bond for itself, or push the legitimate peer out.
+   peer that paired during this connection but did not complete that handshake (whatever the reason,
+   including a peer that disconnects by itself), and of any peer whose handshake shows a different PSK.
+   A bond that existed before the connection is kept when the handshake only times out or fails
+   otherwise: the peer could encrypt with it, so it is the device the bond was made with. The receiver
+   never deletes the registered desk unit's bond when encryption fails and does not re-pair with it,
+   because a device without the PSK can claim the desk unit's address and fail encryption on purpose.
+   The desk unit lets a peer it already has a bond with pair again only within its 120 s window (for
+   example a receiver that lost its bond) and refuses outside it. Before deleting the old bond it keeps
+   a copy in RAM, and it writes that copy back unless the peer that paired again completes the layer-2
+   handshake on that connection, so claiming the receiver's address within the window does not replace
+   its bond either. A second re-pairing on the same connection is refused. When the bond store is full,
+   no existing bond is evicted to make room. A device without the PSK therefore cannot make the
+   receiver stick to it, keep the desk unit's bond for itself, or push the legitimate peer out. If you
+   erase the desk unit's bonds, erase the receiver's too (see "Generating the pre-shared key" below).
 2. **Application layer with a pre-shared key (PSK) and ephemeral X25519** (link protocol v2), implemented in
    [`firmware/components/yd_link/yd_sec.c`](firmware/components/yd_link/yd_sec.c):
    - The same random 256-bit key is flashed into both units (`YDK1` + 32 bytes at `0x190000`,
@@ -92,8 +102,9 @@ that case.
   your real receiver. The receiver is a USB keyboard to your computer, so the fake unit could make it
   **type keystrokes, with no touch and no PIN**. By default the receiver only types input shaped like a
   Yubico OTP (`CONFIG_YD_OTP_KBD_FILTER_MODHEX`): in one burst of keystrokes, up to 64 of the 16 ModHex
-  letters without modifier keys, and a single Enter only after 32 to 64 of them. Anything else blocks the
-  rest of that burst. Each report may hold one key, and the receiver types each accepted key as a press
+  letters without modifier keys, and an Enter only right after 32 to 64 of them (one Enter per OTP; an OTP
+  and Enter can follow another OTP and Enter in the same burst). Anything else blocks the rest of that
+  burst. Each report may hold one key, and the receiver types each accepted key as a press
   and a release itself, so holding a key down for the computer's key repeat does not work either. A fake
   desk unit therefore cannot type commands, other characters, or a short
   answer followed by Enter. It can still type ModHex letters, and an Enter after 32 of them, which apps
@@ -109,6 +120,14 @@ that case.
   - OTP challenge-response (HMAC-SHA1, used by KeePassXC) answers without a touch unless the slot was
     programmed with `--touch`.
   - Wrong PIN attempts can use up the PIN retry counters and lock PIV/OpenPGP PINs (denial of service).
+  - It can also **break the key's configuration without a touch** (denial of service, not theft of
+    secrets). Over the smart-card interface, which the desk unit relays without reading APDUs, that
+    includes resetting the OATH application, resetting PIV or OpenPGP after using up the PIN and PUK
+    retries, and changing the key's settings through the management application (enabled interfaces,
+    a configuration lock code). The desk unit does block OTP commands that change the key (programming,
+    updating, swapping or deleting slots, access codes, NDEF, device settings): only challenge-response
+    and reading the serial number and capabilities are relayed. Slots therefore cannot be configured
+    through KeyRelay; plug the key into a computer for that.
 - **You may not notice.** A stolen key is missed quickly, a silently copied PSK is not. If you suspect a
   leak, generate a new key file, flash it to all units and erase the BLE bonds.
 
@@ -220,3 +239,6 @@ held; desk unit: on release, and its BOOT button is inside the case), and also b
 image at `0x0`, which overwrites `nvs`. A desk unit without a bond, or within 120 s of booting, accepts
 a new bond; only a peer holding the PSK can then complete the KeyRelay handshake. Erasing bonds
 therefore does not lock out a unit that still has the PSK (see "If a unit is lost or stolen").
+The receiver keeps its registered desk unit's bond even when the desk unit no longer has it (see
+"How the BLE link is protected"), so after erasing the desk unit's bonds, erase the receiver's as well;
+they then pair again on their own within the desk unit's 120 s window.
